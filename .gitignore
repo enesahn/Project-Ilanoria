@@ -1,0 +1,11 @@
+/target
+.env
+Cargo.lock
+1.txt
+
+backup/
+.claude/
+AGENTS.md
+.cursorignore
+.repomixignore
+repomix-output.txt

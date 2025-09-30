@@ -1,0 +1,337 @@
+use crate::interfaces::bot::data::{Task, UserConfig, Wallet};
+use crate::interfaces::bot::ui::State;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+
+const ITEMS_PER_PAGE: usize = 5;
+
+pub fn main_menu_keyboard() -> InlineKeyboardMarkup {
+    let buttons = vec![
+        vec![
+            InlineKeyboardButton::callback("📋 Tasks", "view_tasks"),
+            InlineKeyboardButton::callback("💰 Wallets", "view_wallets"),
+        ],
+        vec![
+            InlineKeyboardButton::callback("⚙️ Settings", "view_cfg"),
+            InlineKeyboardButton::callback("↻ Refresh", "refresh_main"),
+        ],
+    ];
+    InlineKeyboardMarkup::new(buttons)
+}
+
+pub fn tasks_menu_keyboard(tasks: &Vec<Task>) -> InlineKeyboardMarkup {
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+
+    for task_chunk in tasks.chunks(2) {
+        let row = task_chunk
+            .iter()
+            .map(|task| {
+                let status = if task.active { "🟢" } else { "🔴" };
+                let text = format!("{} {}", task.name, status);
+                InlineKeyboardButton::callback(text, format!("task_detail_{}", task.name))
+            })
+            .collect();
+        buttons.push(row);
+    }
+
+    buttons.push(vec![InlineKeyboardButton::callback(
+        "➕ Create New Task",
+        "create_task",
+    )]);
+    buttons.push(vec![InlineKeyboardButton::callback(
+        "← Back to Main Menu",
+        "main_menu",
+    )]);
+
+    InlineKeyboardMarkup::new(buttons)
+}
+
+pub fn task_detail_keyboard(task: &Task) -> InlineKeyboardMarkup {
+    use crate::interfaces::bot::data::types::Platform;
+
+    let active_status_icon = if task.active { "🟢" } else { "🔴" };
+    let inform_only_icon = if task.inform_only { "🟢" } else { "🔴" };
+
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+
+    buttons.push(vec![InlineKeyboardButton::callback(
+        format!("📝 Task Name: {}", task.name),
+        format!("task_name_{}", task.name),
+    )]);
+
+    let telegram_text = if task.platform == Platform::Telegram {
+        "✅ Telegram".to_string()
+    } else {
+        "Telegram".to_string()
+    };
+    let discord_text = if task.platform == Platform::Discord {
+        "✅ Discord".to_string()
+    } else {
+        "Discord".to_string()
+    };
+    buttons.push(vec![
+        InlineKeyboardButton::callback(
+            telegram_text,
+            format!("task_platform_telegram_{}", task.name),
+        ),
+        InlineKeyboardButton::callback(
+            discord_text,
+            format!("task_platform_discord_{}", task.name),
+        ),
+    ]);
+
+    buttons.push(vec![
+        InlineKeyboardButton::callback(
+            format!("Buy: {} SOL", task.buy_amount_sol),
+            format!("task_buy_amount_{}", task.name),
+        ),
+        InlineKeyboardButton::callback(
+            format!("Fee: {} SOL", task.buy_priority_fee_sol),
+            format!("task_buy_fee_{}", task.name),
+        ),
+        InlineKeyboardButton::callback(
+            format!("Slippage: {}%", task.buy_slippage_percent),
+            format!("task_slippage_{}", task.name),
+        ),
+    ]);
+
+    if task.platform == Platform::Telegram {
+        let channel_id_text = task
+            .listen_channels
+            .first()
+            .map_or("Not Set".to_string(), |id| id.to_string());
+        buttons.push(vec![InlineKeyboardButton::callback(
+            "👥 Telegram Users to Monitor",
+            format!("task_users_{}", task.name),
+        )]);
+        buttons.push(vec![
+            InlineKeyboardButton::callback(
+                format!("📢 Set Channel ID: {}", channel_id_text),
+                format!("task_channels_{}", task.name),
+            ),
+            InlineKeyboardButton::callback(
+                format!("{} Inform Only", inform_only_icon),
+                format!("task_toggle_inform_{}", task.name),
+            ),
+        ]);
+    } else {
+        buttons.push(vec![InlineKeyboardButton::callback(
+            "🔑 Set Discord Token",
+            format!("task_discord_token_{}", task.name),
+        )]);
+        buttons.push(vec![InlineKeyboardButton::callback(
+            "👥 Discord Users to Monitor",
+            format!("task_discord_users_{}", task.name),
+        )]);
+        let discord_channel_text = task.discord_channel_id.as_deref().unwrap_or("Not Set");
+        buttons.push(vec![
+            InlineKeyboardButton::callback(
+                format!("📢 Set Channel ID: {}", discord_channel_text),
+                format!("task_discord_channel_{}", task.name),
+            ),
+            InlineKeyboardButton::callback(
+                format!("{} Inform Only", inform_only_icon),
+                format!("task_toggle_inform_{}", task.name),
+            ),
+        ]);
+    }
+
+    buttons.push(vec![InlineKeyboardButton::callback(
+        format!("🚫 Blacklist Words ({})", task.blacklist_words.len()),
+        format!("task_blacklist_{}", task.name),
+    )]);
+
+    buttons.push(vec![
+        InlineKeyboardButton::callback(
+            format!("{} Active", active_status_icon),
+            format!("task_toggle_{}", task.name),
+        ),
+        InlineKeyboardButton::callback("🗑️ Delete", format!("task_delete_{}", task.name)),
+    ]);
+
+    buttons.push(vec![InlineKeyboardButton::callback("← Back", "view_tasks")]);
+
+    InlineKeyboardMarkup::new(buttons)
+}
+
+pub fn task_delete_confirmation_keyboard(task_name: &str) -> InlineKeyboardMarkup {
+    let clean_task_name = task_name
+        .strip_prefix("task_delete_confirm_")
+        .unwrap_or(task_name);
+    let buttons = vec![
+        vec![InlineKeyboardButton::callback(
+            "✅ Yes, delete",
+            format!("task_delete_confirm_{}", clean_task_name),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "❌ Cancel",
+            format!("task_detail_{}", clean_task_name),
+        )],
+    ];
+    InlineKeyboardMarkup::new(buttons)
+}
+
+pub async fn channel_selection_keyboard(state: &State) -> Option<InlineKeyboardMarkup> {
+    if let State::TaskSelectChannelFromList {
+        task_name,
+        all_channels,
+        page,
+        ..
+    } = state
+    {
+        let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+        let start = page * ITEMS_PER_PAGE;
+        let end = (start + ITEMS_PER_PAGE).min(all_channels.len());
+
+        for (name, id) in &all_channels[start..end] {
+            buttons.push(vec![InlineKeyboardButton::callback(
+                name,
+                format!("task_chan_select_{}_{}", task_name, id),
+            )]);
+        }
+
+        let mut nav_row = Vec::new();
+        if *page > 0 {
+            nav_row.push(InlineKeyboardButton::callback(
+                "< Prev",
+                format!("task_chan_page_{}_{}", task_name, page - 1),
+            ));
+        }
+        if end < all_channels.len() {
+            nav_row.push(InlineKeyboardButton::callback(
+                "Next >",
+                format!("task_chan_page_{}_{}", task_name, page + 1),
+            ));
+        }
+        if !nav_row.is_empty() {
+            buttons.push(nav_row);
+        }
+
+        buttons.push(vec![InlineKeyboardButton::callback(
+            "← Cancel",
+            format!("task_detail_{}", task_name),
+        )]);
+        Some(InlineKeyboardMarkup::new(buttons))
+    } else {
+        None
+    }
+}
+
+pub async fn user_selection_keyboard(state: &State) -> Option<InlineKeyboardMarkup> {
+    if let State::TaskSelectUsersFromList {
+        task_name,
+        all_users,
+        selected_users,
+        page,
+        ..
+    } = state
+    {
+        let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+        let start = page * ITEMS_PER_PAGE;
+        let end = (start + ITEMS_PER_PAGE).min(all_users.len());
+
+        for (name, id, role) in &all_users[start..end] {
+            let check = if selected_users.contains(id) {
+                "✅"
+            } else {
+                " "
+            };
+            let text = format!("{} {} - {}", check, name, role);
+            buttons.push(vec![InlineKeyboardButton::callback(
+                text,
+                format!("task_user_toggle_{}_{}", task_name, id),
+            )]);
+        }
+
+        let mut nav_row = Vec::new();
+        if *page > 0 {
+            nav_row.push(InlineKeyboardButton::callback(
+                "< Prev",
+                format!("task_user_page_{}_{}", task_name, page - 1),
+            ));
+        }
+        if end < all_users.len() {
+            nav_row.push(InlineKeyboardButton::callback(
+                "Next >",
+                format!("task_user_page_{}_{}", task_name, page + 1),
+            ));
+        }
+        if !nav_row.is_empty() {
+            buttons.push(nav_row);
+        }
+
+        buttons.push(vec![InlineKeyboardButton::callback(
+            "← Back",
+            format!("task_detail_{}", task_name),
+        )]);
+        Some(InlineKeyboardMarkup::new(buttons))
+    } else {
+        None
+    }
+}
+
+pub fn wallets_menu_keyboard(wallets: &[Wallet], default_index: usize) -> InlineKeyboardMarkup {
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+
+    for (i, wallet) in wallets.iter().enumerate() {
+        let name = &wallet.name;
+        let icon = if i == default_index { "✅" } else { "☑️" };
+        let text = format!("{} {}", icon, name);
+        buttons.push(vec![
+            InlineKeyboardButton::callback(text, format!("set_default_{}", i)),
+            InlineKeyboardButton::callback("🗑️", format!("remove_wallet_{}", i)),
+        ]);
+    }
+
+    buttons.push(vec![
+        InlineKeyboardButton::callback("➕ Create Wallet", "create_wallet"),
+        InlineKeyboardButton::callback("📥 Import Wallet", "import_wallet"),
+    ]);
+
+    buttons.push(vec![InlineKeyboardButton::callback(
+        "← Back to Main Menu",
+        "main_menu",
+    )]);
+
+    InlineKeyboardMarkup::new(buttons)
+}
+
+pub fn settings_menu_keyboard() -> InlineKeyboardMarkup {
+    let buttons = vec![
+        vec![InlineKeyboardButton::callback(
+            "📊 Edit Slippage",
+            "edit_slippage",
+        )],
+        vec![
+            InlineKeyboardButton::callback("✍️ Edit Buy Fee", "edit_buy_priority_fee"),
+            InlineKeyboardButton::callback("✍️ Edit Sell Fee", "edit_sell_priority_fee"),
+        ],
+        vec![InlineKeyboardButton::callback(
+            "← Back to Main Menu",
+            "main_menu",
+        )],
+    ];
+    InlineKeyboardMarkup::new(buttons)
+}
+
+pub fn token_info_keyboard(config: &UserConfig, _mint: &str) -> InlineKeyboardMarkup {
+    let fee_text = format!(
+        "⚙️ B/S Fee: {}/{} SOL",
+        config.buy_priority_fee_sol, config.sell_priority_fee_sol
+    );
+
+    let buttons = vec![
+        vec![InlineKeyboardButton::callback("↻ Refresh", "r")],
+        vec![
+            InlineKeyboardButton::callback("💰 Buy 1 SOL", "b_1"),
+            InlineKeyboardButton::callback("💰 Buy 3 SOL", "b_3"),
+            InlineKeyboardButton::callback("💰 Buy X SOL", "b_custom"),
+        ],
+        vec![InlineKeyboardButton::callback(fee_text, "view_cfg")],
+        vec![
+            InlineKeyboardButton::callback("📉 Sell 50%", "s_50"),
+            InlineKeyboardButton::callback("📉 Sell 100%", "s_100"),
+            InlineKeyboardButton::callback("📉 Sell X%", "s_custom"),
+        ],
+    ];
+    InlineKeyboardMarkup::new(buttons)
+}
