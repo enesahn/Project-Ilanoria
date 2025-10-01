@@ -168,12 +168,16 @@ pub async fn get_token_info_from_bloom(client: &UserClientHandle, mint: &str) ->
 }
 
 fn format_user_name(user: &User) -> String {
-    let mut name = user.first_name().unwrap_or("").to_string();
-    if let Some(last) = user.last_name() {
-        name.push(' ');
-        name.push_str(last);
+    if let Some(username) = user.username() {
+        format!("@{}", username)
+    } else {
+        let mut name = user.first_name().unwrap_or("").to_string();
+        if let Some(last) = user.last_name() {
+            name.push(' ');
+            name.push_str(last);
+        }
+        name
     }
-    name
 }
 
 pub async fn get_chat_admins(

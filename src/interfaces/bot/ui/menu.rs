@@ -128,6 +128,12 @@ pub async fn generate_task_detail_text(
             let channel_name_str = task.listen_channel_name.as_deref().unwrap_or("N/A");
             let monitoring_str = if task.listen_users.is_empty() {
                 "All users (not filtered)".to_string()
+            } else if !task.listen_usernames.is_empty() {
+                format!(
+                    "{} users: {}",
+                    task.listen_usernames.len(),
+                    task.listen_usernames.join(", ")
+                )
             } else {
                 let users = task
                     .listen_users

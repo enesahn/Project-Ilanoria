@@ -35,6 +35,8 @@ pub struct Task {
     pub listen_channels: Vec<i64>,
     pub listen_channel_name: Option<String>,
     pub listen_users: Vec<i64>,
+    #[serde(default)]
+    pub listen_usernames: Vec<String>,
     pub discord_token: Option<String>,
     pub discord_channel_id: Option<String>,
     pub discord_username: Option<String>,

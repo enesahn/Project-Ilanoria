@@ -18,6 +18,7 @@ solana-sdk = "2.3.0"
 solana-rpc-client = "2.3.6"
 solana-rpc-client-api = "2.3.6"
 colored = "2.2.0"
+unicode-width = "0.1"
 reqwest = { version = "0.12.12", features = ["json", "multipart"] }
 chrono = "0.4.39"
 anyhow = "1.0.90"

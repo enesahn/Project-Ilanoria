@@ -2,7 +2,7 @@ use crate::BloomBuyAck;
 use crate::infrastructure::blockchain::bloom_buy;
 use crate::interfaces::bot::core::update_bus;
 use crate::interfaces::bot::escape_markdown;
-use crate::interfaces::bot::tasks::state;
+use crate::interfaces::bot::tasks::{append_task_log, state};
 use crate::interfaces::bot::{Task, UserData, log_buffer_to_ca_detection};
 use crate::{PENDING_BLOOM_RESPONSES, USER_CLIENT_HANDLE};
 use chrono::Local;
@@ -14,6 +14,12 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::Duration;
+
+fn log_task_event(chat_id: i64, task_name: &str, message: impl Into<String>) {
+    let message = message.into();
+    log::info!("task.telegram[{}:{}] {}", chat_id, task_name, message);
+    append_task_log(chat_id, task_name, message);
+}
 
 async fn send_notification_markdown(chat_id: i64, message: String) {
     let bot = Bot::from_env();
@@ -188,7 +194,6 @@ async fn process_message(
     );
 
     let t_all_start = Instant::now();
-
     let sender = msg.sender();
     let message_chat_id = msg.chat().id();
     let effective_sender_id = match sender.as_ref() {
@@ -217,14 +222,42 @@ async fn process_message(
         blacklist_check_us,
         if detected_words.is_empty() { 0 } else { 1 }
     );
+    let task_name = task.name.clone();
+    log_task_event(
+        chat_id,
+        &task_name,
+        format!(
+            "Incoming message in channel {} (sender {}, {} chars)",
+            message_chat_id,
+            sender_name,
+            message_text.len()
+        ),
+    );
 
     if !should_listen {
         log::info!("perf.skip_not_in_listening_set=1");
+        log_task_event(
+            chat_id,
+            &task_name,
+            format!(
+                "Ignored message from {} (not monitored)",
+                format_sender_name(sender.as_ref())
+            ),
+        );
         return;
     }
 
     if !detected_words.is_empty() {
         let words_str = detected_words.join(", ");
+        log_task_event(
+            chat_id,
+            &task_name,
+            format!(
+                "Blocked message from {} due to blacklist hit: {}",
+                format_sender_name(sender.as_ref()),
+                words_str
+            ),
+        );
         let notification = format!(
             "🚫 Blacklist word detected in `{}` from `{}`\\. Skipping\\.\\.\n\n`{}`",
             escape_markdown(channel_name),
@@ -257,6 +290,11 @@ async fn process_message(
             mint.clone(),
             log_buffer,
         ));
+        log_task_event(
+            chat_id,
+            &task_name,
+            format!("Detected potential mint {} from {}", mint, sender_name),
+        );
 
         let t_dedup = Instant::now();
         let mut sent_cas_guard = sent_cas.lock().await;
@@ -273,6 +311,11 @@ async fn process_message(
         );
         if is_dup {
             log::info!("perf.duplicate_ca=1 mint={}", mint);
+            log_task_event(
+                chat_id,
+                &task_name,
+                format!("Duplicate mint {} ignored", mint),
+            );
             return;
         }
 
@@ -322,6 +365,11 @@ async fn process_message(
                 total_ms * 1000,
                 mint
             );
+            log_task_event(
+                chat_id,
+                &task_name,
+                format!("Inform-only alert dispatched for mint {}", mint),
+            );
             send_notification_markdown(chat_id, notification).await;
         } else {
             if let Some(user_data) = user_data_option {
@@ -340,6 +388,14 @@ async fn process_message(
                     .await;
                     let api_duration = api_request_start_time.elapsed();
                     let api_us = api_duration.as_micros();
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        format!(
+                            "Bloom buy initiated for mint {} ({} SOL, slippage {}%)",
+                            mint, task.buy_amount_sol, task.buy_slippage_percent
+                        ),
+                    );
 
                     match buy_result {
                         Ok(_) => {
@@ -349,6 +405,7 @@ async fn process_message(
                             match bot_response_result {
                                 Ok(Ok(ack)) => {
                                     let ack_wait_us = ack_wait_start.elapsed().as_micros();
+                                    let signature_opt = ack.signature.clone();
                                     let msg_text = build_buy_success_message(
                                         &mint,
                                         task.buy_amount_sol,
@@ -365,6 +422,22 @@ async fn process_message(
                                         total_us,
                                         mint
                                     );
+                                    if let Some(signature) = signature_opt {
+                                        log_task_event(
+                                            chat_id,
+                                            &task_name,
+                                            format!(
+                                                "Bloom buy confirmed for mint {} (signature {})",
+                                                mint, signature
+                                            ),
+                                        );
+                                    } else {
+                                        log_task_event(
+                                            chat_id,
+                                            &task_name,
+                                            format!("Bloom buy confirmed for mint {}", mint),
+                                        );
+                                    }
                                     send_notification_markdown(chat_id, msg_text).await;
                                 }
                                 Ok(Err(_)) => {
@@ -384,6 +457,14 @@ async fn process_message(
                                         ack_wait_us,
                                         total_us,
                                         mint
+                                    );
+                                    log_task_event(
+                                        chat_id,
+                                        &task_name,
+                                        format!(
+                                            "Bloom buy finished for mint {} (ACK channel closed)",
+                                            mint
+                                        ),
                                     );
                                     send_notification_markdown(chat_id, msg_text).await;
                                 }
@@ -405,6 +486,14 @@ async fn process_message(
                                         total_us,
                                         mint
                                     );
+                                    log_task_event(
+                                        chat_id,
+                                        &task_name,
+                                        format!(
+                                            "Bloom buy pending for mint {} (ACK timeout)",
+                                            mint
+                                        ),
+                                    );
                                     send_notification_markdown(chat_id, msg_text).await;
                                 }
                             };
@@ -418,6 +507,11 @@ async fn process_message(
                                 total_us,
                                 e,
                                 mint
+                            );
+                            log_task_event(
+                                chat_id,
+                                &task_name,
+                                format!("Bloom buy failed for mint {}: {}", mint, e),
                             );
                             let error_msg = format!(
                                 "❌ *Buy Request Failed*\n\n*Token:* `{}`\n*Error:* `{}`",
@@ -433,6 +527,11 @@ async fn process_message(
                     let no_wallet_msg =
                         "❌ *Buy Error*\n\nNo default wallet found for auto\\-buy task\\."
                             .to_string();
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        "Bloom buy skipped: no default wallet configured".to_string(),
+                    );
                     send_notification_markdown(chat_id, no_wallet_msg).await;
                 }
             }
@@ -440,6 +539,11 @@ async fn process_message(
     } else {
         let total_us = t_all_start.elapsed().as_micros();
         log::info!("perf.total_us={} ca_not_found=1", total_us);
+        log_task_event(
+            chat_id,
+            &task_name,
+            "No contract address detected in Telegram message".to_string(),
+        );
     }
 }
 
@@ -448,6 +552,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
     if let Some(_client) = handle {
         if initial_task.listen_channels.is_empty() {
             log::warn!("task.tg: task has no channels name={}", initial_task.name);
+            log_task_event(
+                chat_id,
+                &initial_task.name,
+                "Task has no channels configured; cannot start monitor".to_string(),
+            );
             return;
         }
 
@@ -464,6 +573,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
             "task.tg: registered session_id={} task={}",
             session_id,
             task_name
+        );
+        log_task_event(
+            chat_id,
+            &task_name,
+            "Telegram task monitor started".to_string(),
         );
 
         tokio::spawn(async move {
@@ -486,6 +600,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
                         "task.tg: session invalidated stopping session={}",
                         session_id
                     );
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        "Telegram task monitor stopped (session replaced)".to_string(),
+                    );
                     break;
                 }
 
@@ -493,6 +612,7 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
                     Ok(u) => u,
                     Err(e) => {
                         log::error!("task.tg: bus recv error {}", e);
+                        log_task_event(chat_id, &task_name, format!("Update bus error: {}", e));
                         break;
                     }
                 };
@@ -501,6 +621,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
 
                 if !task_snapshot.active {
                     log::info!("task.tg: task inactive stopping");
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        "Task deactivated, stopping monitor".to_string(),
+                    );
                     break;
                 }
 
@@ -508,6 +633,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
                     Some(id) => id,
                     None => {
                         log::warn!("task.tg: no channel configured task={}", task_snapshot.name);
+                        log_task_event(
+                            chat_id,
+                            &task_name,
+                            "No Telegram channel configured; stopping monitor".to_string(),
+                        );
                         continue;
                     }
                 };
@@ -534,5 +664,10 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
         });
     } else {
         log::warn!("task.tg: user client not logged in");
+        log_task_event(
+            chat_id,
+            &initial_task.name,
+            "Telegram user client not logged in; task monitor not started".to_string(),
+        );
     }
 }

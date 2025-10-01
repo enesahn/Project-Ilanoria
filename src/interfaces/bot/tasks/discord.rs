@@ -2,7 +2,7 @@ use crate::BloomBuyAck;
 use crate::PENDING_BLOOM_RESPONSES;
 use crate::infrastructure::blockchain::bloom_buy;
 use crate::interfaces::bot::escape_markdown;
-use crate::interfaces::bot::tasks::state;
+use crate::interfaces::bot::tasks::{append_task_log, state};
 use crate::interfaces::bot::{Task, UserData, log_buffer_to_ca_detection};
 use chrono::Local;
 use futures_util::{SinkExt, StreamExt};
@@ -15,6 +15,12 @@ use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, ParseM
 use tokio::sync::{Mutex, RwLock, oneshot};
 use tokio::time::{Duration, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+fn log_task_event(chat_id: i64, task_name: &str, message: impl Into<String>) {
+    let message = message.into();
+    log::info!("task.discord[{}:{}] {}", chat_id, task_name, message);
+    append_task_log(chat_id, task_name, message);
+}
 
 async fn send_notification_markdown(chat_id: i64, message: String) {
     let bot = Bot::from_env();
@@ -162,6 +168,17 @@ async fn process_discord_message(
     );
 
     let t_all_start = Instant::now();
+    let task_name = task.name.clone();
+    log_task_event(
+        chat_id,
+        &task_name,
+        format!(
+            "Incoming message from {} in channel {} ({} chars)",
+            message_author,
+            channel_id,
+            message_content.len()
+        ),
+    );
 
     let should_listen = task.discord_users.is_empty()
         || task
@@ -171,6 +188,11 @@ async fn process_discord_message(
 
     if !should_listen {
         log::info!("perf.skip_not_in_listening_set=1 author={}", message_author);
+        log_task_event(
+            chat_id,
+            &task_name,
+            format!("Ignored message from {} (not monitored)", message_author),
+        );
         return;
     }
 
@@ -190,6 +212,14 @@ async fn process_discord_message(
 
     if !detected_words.is_empty() {
         let words_str = detected_words.join(", ");
+        log_task_event(
+            chat_id,
+            &task_name,
+            format!(
+                "Blocked message from {} due to blacklist hit: {}",
+                message_author, words_str
+            ),
+        );
         let notification = format!(
             "🚫 Blacklist word detected in Discord from `{}`\\. Skipping\\.\\.\n\n`{}`",
             escape_markdown(&message_author),
@@ -222,6 +252,11 @@ async fn process_discord_message(
             mint.clone(),
             log_buffer,
         ));
+        log_task_event(
+            chat_id,
+            &task_name,
+            format!("Detected potential mint {} from {}", mint, message_author),
+        );
 
         let t_dedup = Instant::now();
         let mut sent_cas_guard = sent_cas.lock().await;
@@ -238,6 +273,11 @@ async fn process_discord_message(
         );
         if is_dup {
             log::info!("perf.duplicate_ca=1 mint={}", mint);
+            log_task_event(
+                chat_id,
+                &task_name,
+                format!("Duplicate mint {} ignored", mint),
+            );
             return;
         }
 
@@ -287,6 +327,11 @@ async fn process_discord_message(
                 total_ms * 1000,
                 mint
             );
+            log_task_event(
+                chat_id,
+                &task_name,
+                format!("Inform-only alert dispatched for mint {}", mint),
+            );
             send_notification_markdown(chat_id, notification).await;
         } else {
             if let Some(user_data) = user_data_option {
@@ -305,6 +350,14 @@ async fn process_discord_message(
                     .await;
                     let api_duration = api_request_start_time.elapsed();
                     let api_us = api_duration.as_micros();
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        format!(
+                            "Bloom buy initiated for mint {} ({} SOL, slippage {}%)",
+                            mint, task.buy_amount_sol, task.buy_slippage_percent
+                        ),
+                    );
 
                     match buy_result {
                         Ok(_) => {
@@ -314,6 +367,7 @@ async fn process_discord_message(
                             match bot_response_result {
                                 Ok(Ok(ack)) => {
                                     let ack_wait_us = ack_wait_start.elapsed().as_micros();
+                                    let signature_opt = ack.signature.clone();
                                     let msg_text = build_buy_success_message(
                                         &mint,
                                         task.buy_amount_sol,
@@ -330,6 +384,22 @@ async fn process_discord_message(
                                         total_us,
                                         mint
                                     );
+                                    if let Some(signature) = signature_opt {
+                                        log_task_event(
+                                            chat_id,
+                                            &task_name,
+                                            format!(
+                                                "Bloom buy confirmed for mint {} (signature {})",
+                                                mint, signature
+                                            ),
+                                        );
+                                    } else {
+                                        log_task_event(
+                                            chat_id,
+                                            &task_name,
+                                            format!("Bloom buy confirmed for mint {}", mint),
+                                        );
+                                    }
                                     send_notification_markdown(chat_id, msg_text).await;
                                 }
                                 Ok(Err(_)) => {
@@ -349,6 +419,14 @@ async fn process_discord_message(
                                         ack_wait_us,
                                         total_us,
                                         mint
+                                    );
+                                    log_task_event(
+                                        chat_id,
+                                        &task_name,
+                                        format!(
+                                            "Bloom buy finished for mint {} (ACK channel closed)",
+                                            mint
+                                        ),
                                     );
                                     send_notification_markdown(chat_id, msg_text).await;
                                 }
@@ -370,6 +448,14 @@ async fn process_discord_message(
                                         total_us,
                                         mint
                                     );
+                                    log_task_event(
+                                        chat_id,
+                                        &task_name,
+                                        format!(
+                                            "Bloom buy pending for mint {} (ACK timeout)",
+                                            mint
+                                        ),
+                                    );
                                     send_notification_markdown(chat_id, msg_text).await;
                                 }
                             };
@@ -383,6 +469,11 @@ async fn process_discord_message(
                                 total_us,
                                 e,
                                 mint
+                            );
+                            log_task_event(
+                                chat_id,
+                                &task_name,
+                                format!("Bloom buy failed for mint {}: {}", mint, e),
                             );
                             let error_msg = format!(
                                 "❌ *Buy Request Failed*\n\n*Token:* `{}`\n*Error:* `{}`",
@@ -398,6 +489,11 @@ async fn process_discord_message(
                     let no_wallet_msg =
                         "❌ *Buy Error*\n\nNo default wallet found for auto\\-buy task\\."
                             .to_string();
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        "Bloom buy skipped: no default wallet configured".to_string(),
+                    );
                     send_notification_markdown(chat_id, no_wallet_msg).await;
                 }
             }
@@ -422,6 +518,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
         session_id,
         task_name
     );
+    log_task_event(
+        chat_id,
+        &task_name,
+        "Discord task monitor started".to_string(),
+    );
 
     let user_data_state = state::get_user_data_state(chat_id);
 
@@ -445,6 +546,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
                     "task.discord: session invalidated stopping session={}",
                     session_id
                 );
+                log_task_event(
+                    chat_id,
+                    &task_name,
+                    "Discord task monitor stopped (session replaced)".to_string(),
+                );
                 break;
             }
 
@@ -452,6 +558,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
 
             if !task_snapshot.active {
                 log::info!("task.discord: task inactive stopping");
+                log_task_event(
+                    chat_id,
+                    &task_name,
+                    "Task deactivated, stopping monitor".to_string(),
+                );
                 break;
             }
 
@@ -459,6 +570,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
                 Some(t) => t,
                 None => {
                     log::warn!("task.discord: no token task={}", task_snapshot.name);
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        "No Discord token configured; stopping monitor".to_string(),
+                    );
                     break;
                 }
             };
@@ -467,6 +583,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
                 Some(c) => c,
                 None => {
                     log::warn!("task.discord: no channel_id task={}", task_snapshot.name);
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        "No Discord channel configured; stopping monitor".to_string(),
+                    );
                     break;
                 }
             };
@@ -484,10 +605,20 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
             {
                 Ok(_) => {
                     log::info!("task.discord: gateway connection ended cleanly");
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        "Discord gateway connection ended".to_string(),
+                    );
                 }
                 Err(e) => {
                     log::error!("task.discord: gateway error {} - reconnecting in 5s", e);
                     sleep(Duration::from_secs(5)).await;
+                    log_task_event(
+                        chat_id,
+                        &task_name,
+                        format!("Discord gateway error: {}. Retrying...", e),
+                    );
                 }
             }
 
@@ -495,6 +626,11 @@ pub async fn start_task_monitor(initial_task: Task, chat_id: i64) {
 
             if !still_active {
                 log::info!("task.discord: task deactivated stopping");
+                log_task_event(
+                    chat_id,
+                    &task_name,
+                    "Task deactivated, stopping monitor".to_string(),
+                );
                 break;
             }
         }
@@ -516,6 +652,11 @@ async fn connect_discord_gateway(
     let (write, mut read) = ws_stream.split();
     let write = Arc::new(Mutex::new(write));
     let task_name = { task_state.read().await.name.clone() };
+    log_task_event(
+        chat_id,
+        &task_name,
+        format!("Connected to Discord gateway for channel {}", channel_id),
+    );
     let mut active_channel_id = channel_id;
 
     while let Some(msg) = read.next().await {
@@ -612,7 +753,16 @@ async fn connect_discord_gateway(
                                 active_channel_id,
                                 desired_channel_id
                             );
+                            let previous_channel = active_channel_id.clone();
                             active_channel_id = desired_channel_id.clone();
+                            log_task_event(
+                                chat_id,
+                                &task_name,
+                                format!(
+                                    "Switched Discord channel from {} to {}",
+                                    previous_channel, desired_channel_id
+                                ),
+                            );
                         }
 
                         let d = &payload["d"];

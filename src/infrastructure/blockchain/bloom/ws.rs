@@ -1,11 +1,13 @@
-use crate::{ACTIVE_BLOOM_SWAPS, BloomBuyAck, BloomSwapTracker, PENDING_BLOOM_RESPONSES};
+use crate::{
+    ACTIVE_BLOOM_SWAPS, BLOOM_WS_CONNECTION, BloomBuyAck, BloomSwapTracker, PENDING_BLOOM_RESPONSES,
+};
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde::Deserialize;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -46,6 +48,7 @@ pub async fn run_bloom_ws_listener() {
             }
             Err(err) => {
                 log::error!("bloom_ws: connection attempt failed err=\"{}\"", err);
+                mark_ws_offline();
                 backoff_ms = (backoff_ms * 2).min(30000);
             }
         }
@@ -54,10 +57,21 @@ pub async fn run_bloom_ws_listener() {
 }
 
 async fn connect_once() -> Result<()> {
-    let token = std::env::var("BLOOM_AUTH_TOKEN")
-        .map_err(|_| anyhow!("BLOOM_AUTH_TOKEN environment variable not set"))?;
+    let token = match std::env::var("BLOOM_AUTH_TOKEN") {
+        Ok(value) => value,
+        Err(_) => {
+            mark_ws_offline();
+            return Err(anyhow!("BLOOM_AUTH_TOKEN environment variable not set"));
+        }
+    };
     let encoded_token = encode(&token);
-    let url = Url::parse(&format!("wss://{}?{}", BLOOM_WS_HOST, encoded_token))?;
+    let url = match Url::parse(&format!("wss://{}?{}", BLOOM_WS_HOST, encoded_token)) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            mark_ws_offline();
+            return Err(err.into());
+        }
+    };
     log::info!("bloom_ws: attempting connection");
     let mut key_bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut key_bytes);
@@ -80,8 +94,15 @@ async fn connect_once() -> Result<()> {
             "permessage-deflate; client_max_window_bits",
         )
         .body(())?;
-    let (mut ws_stream, _) = connect_async(request).await?;
+    let (mut ws_stream, _) = match connect_async(request).await {
+        Ok(parts) => parts,
+        Err(err) => {
+            mark_ws_offline();
+            return Err(err.into());
+        }
+    };
     log::info!("bloom_ws: connected");
+    mark_ws_online();
 
     let mut keepalive = tokio::time::interval(Duration::from_secs(20));
     keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -106,29 +127,50 @@ async fn connect_once() -> Result<()> {
                     }
                     Some(Ok(Message::Frame(_))) => {}
                     Some(Ok(Message::Ping(payload))) => {
-                        ws_stream.send(Message::Pong(payload)).await?;
+                        if let Err(err) = ws_stream.send(Message::Pong(payload)).await {
+                            mark_ws_offline();
+                            return Err(err.into());
+                        }
                     }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(frame))) => {
                         log_close_frame(frame);
+                        mark_ws_offline();
                         break;
                     }
                     Some(Err(err)) => {
+                        mark_ws_offline();
                         return Err(err.into());
                     }
                     None => {
                         log::warn!("bloom_ws: stream ended");
+                        mark_ws_offline();
                         break;
                     }
                 }
             }
             _ = keepalive.tick() => {
-                ws_stream.send(Message::Text("keepalive".to_string())).await?;
+                if let Err(err) = ws_stream.send(Message::Text("keepalive".to_string())).await {
+                    mark_ws_offline();
+                    return Err(err.into());
+                }
             }
         }
     }
 
+    mark_ws_offline();
     Ok(())
+}
+
+fn mark_ws_online() {
+    let mut state = BLOOM_WS_CONNECTION.lock();
+    state.is_connected = true;
+    state.last_success_at = Some(SystemTime::now());
+}
+
+fn mark_ws_offline() {
+    let mut state = BLOOM_WS_CONNECTION.lock();
+    state.is_connected = false;
 }
 
 fn handle_message_text(text: &str) {

@@ -1,14 +1,22 @@
 use crate::interfaces::bot::{Task, UserData};
+use chrono::Utc;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use std::collections::HashSet;
+use parking_lot::RwLock as SyncRwLock;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 pub static ACTIVE_TASK_STATES: Lazy<DashMap<(i64, String), Arc<RwLock<Task>>>> =
     Lazy::new(|| DashMap::new());
 pub static USER_DATA_STATES: Lazy<DashMap<i64, Arc<RwLock<UserData>>>> =
     Lazy::new(|| DashMap::new());
+static TASK_LOG_BUFFERS: Lazy<DashMap<(i64, String), Arc<SyncRwLock<VecDeque<String>>>>> =
+    Lazy::new(|| DashMap::new());
+static TASK_LOG_CHANNELS: Lazy<DashMap<(i64, String), broadcast::Sender<String>>> =
+    Lazy::new(|| DashMap::new());
+
+const TASK_LOG_HISTORY: usize = 200;
 
 pub async fn ensure_task_state(chat_id: i64, task: Task) -> Arc<RwLock<Task>> {
     let key_name = task.name.clone();
@@ -73,4 +81,62 @@ pub async fn sync_active_tasks(chat_id: i64, tasks: &[Task]) {
     for (key, _) in removals {
         ACTIVE_TASK_STATES.remove(&key);
     }
+}
+
+fn log_key(chat_id: i64, task_name: &str) -> (i64, String) {
+    (chat_id, task_name.to_string())
+}
+
+fn ensure_log_buffer(chat_id: i64, task_name: &str) -> Arc<SyncRwLock<VecDeque<String>>> {
+    let key = log_key(chat_id, task_name);
+    if let Some(existing) = TASK_LOG_BUFFERS.get(&key) {
+        return Arc::clone(existing.value());
+    }
+
+    let buffer = Arc::new(SyncRwLock::new(VecDeque::with_capacity(TASK_LOG_HISTORY)));
+    TASK_LOG_BUFFERS.insert(key, Arc::clone(&buffer));
+    buffer
+}
+
+fn ensure_log_channel(chat_id: i64, task_name: &str) -> broadcast::Sender<String> {
+    let key = log_key(chat_id, task_name);
+    if let Some(existing) = TASK_LOG_CHANNELS.get(&key) {
+        return existing.value().clone();
+    }
+
+    let (tx, _rx) = broadcast::channel(512);
+    TASK_LOG_CHANNELS.insert(key, tx.clone());
+    tx
+}
+
+pub fn append_task_log(chat_id: i64, task_name: &str, message: impl Into<String>) {
+    let message = message.into();
+    let timestamp = Utc::now().format("%H:%M:%S");
+    let formatted = format!("[{}] {}", timestamp, message);
+
+    let buffer = ensure_log_buffer(chat_id, task_name);
+    {
+        let mut guard = buffer.write();
+        if guard.len() == TASK_LOG_HISTORY {
+            guard.pop_front();
+        }
+        guard.push_back(formatted.clone());
+    }
+
+    let sender = ensure_log_channel(chat_id, task_name);
+    let _ = sender.send(formatted);
+}
+
+pub fn subscribe_task_logs(
+    chat_id: i64,
+    task_name: &str,
+) -> (Vec<String>, broadcast::Receiver<String>) {
+    let buffer = ensure_log_buffer(chat_id, task_name);
+    let entries = {
+        let guard = buffer.read();
+        guard.iter().cloned().collect::<Vec<_>>()
+    };
+
+    let sender = ensure_log_channel(chat_id, task_name);
+    (entries, sender.subscribe())
 }

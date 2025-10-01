@@ -59,6 +59,7 @@ pub async fn handle_task_callbacks(
                     listen_channels: vec![],
                     listen_channel_name: None,
                     listen_users: vec![],
+                    listen_usernames: vec![],
                     discord_token: None,
                     discord_channel_id: None,
                     discord_username: None,
@@ -423,6 +424,7 @@ pub async fn handle_task_callbacks(
                     task.listen_channels = vec![selected_channel_id];
                     task.listen_channel_name = selected_channel_name;
                     task.listen_users = vec![];
+                    task.listen_usernames = vec![];
                 }
                 save_user_data(&mut con, chat_id.0, &user_data).await?;
                 if let Some(task) = user_data.tasks.iter().find(|t| t.name == task_name) {
@@ -464,6 +466,14 @@ pub async fn handle_task_callbacks(
                         if let Some(task) = user_data.tasks.iter_mut().find(|t| t.name == task_name)
                         {
                             task.listen_users = selected_users.clone();
+                            let id_to_display: std::collections::HashMap<i64, String> =
+                                all_users.iter().map(|(n, i, _)| (*i, n.clone())).collect();
+                            let mut selected_names: Vec<String> = selected_users
+                                .iter()
+                                .filter_map(|id| id_to_display.get(id).cloned())
+                                .collect();
+                            selected_names.sort();
+                            task.listen_usernames = selected_names;
                         }
                         save_user_data(&mut con, chat_id.0, &user_data).await?;
                     }

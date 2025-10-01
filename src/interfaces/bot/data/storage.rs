@@ -1,4 +1,4 @@
-use super::types::UserData;
+use super::types::{Task, UserData};
 use crate::interfaces::bot::tasks::state;
 use redis::aio::MultiplexedConnection;
 use redis::{AsyncCommands, RedisResult};
@@ -59,4 +59,11 @@ pub async fn get_all_user_ids(redis_url: &str) -> RedisResult<Vec<i64>> {
         }
     }
     Ok(ids)
+}
+
+pub async fn get_user_tasks(redis_url: &str, chat_id: i64) -> RedisResult<Vec<Task>> {
+    let client = redis::Client::open(redis_url)?;
+    let mut con = client.get_multiplexed_async_connection().await?;
+    let data = get_user_data(&mut con, chat_id).await?;
+    Ok(data.map(|user| user.tasks).unwrap_or_default())
 }

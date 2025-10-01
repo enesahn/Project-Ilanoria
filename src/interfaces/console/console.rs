@@ -1,4 +1,5 @@
 use colored::*;
+use unicode_width::UnicodeWidthStr;
 
 pub struct ConsoleUI;
 
@@ -11,26 +12,21 @@ impl ConsoleUI {
 
     pub fn print_header(title: &str) {
         Self::clear_screen();
-        let width = 78;
-        println!(
-            "{}",
-            "╔══════════════════════════════════════════════════════════════════════════════╗"
-                .bright_cyan()
-        );
-        let padding_total = width - title.len();
+        let min_width = 78;
+        let title_width = UnicodeWidthStr::width(title);
+        let width = min_width.max(title_width);
+        let padding_total = width.saturating_sub(title_width);
         let padding_left = padding_total / 2;
         let padding_right = padding_total - padding_left;
+        let horizontal = "═".repeat(width);
+        println!("{}", format!("╔{}╗", horizontal).bright_cyan());
         println!(
             "║{}{}{}║",
             " ".repeat(padding_left),
             title.bright_yellow().bold(),
             " ".repeat(padding_right)
         );
-        println!(
-            "{}",
-            "╚══════════════════════════════════════════════════════════════════════════════╝"
-                .bright_cyan()
-        );
+        println!("{}", format!("╚{}╝", horizontal).bright_cyan());
         println!();
     }
 

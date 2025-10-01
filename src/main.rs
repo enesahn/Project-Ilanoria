@@ -4,7 +4,7 @@ use reqwest::Client as ReqwestClient;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use teloxide::{dispatching::dialogue::InMemStorage, prelude::*};
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 
@@ -16,6 +16,7 @@ use application::health::worker::{WarmerState, WarmupResult, WarmupStatus, run_w
 use application::indexer::{preload_from_redis, run_ws_ingest};
 use application::pricing::{SolPriceState, run_price_fetcher};
 use infrastructure::blockchain::{RpcClients, create_rpc_clients, run_bloom_ws_listener};
+use infrastructure::logging;
 use interfaces::bot::State;
 use interfaces::bot::handlers::{
     callbacks::callback_handler,
@@ -54,6 +55,13 @@ pub static ACTIVE_TASK_SESSIONS: once_cell::sync::Lazy<
 pub static ACTIVE_BLOOM_SWAPS: once_cell::sync::Lazy<
     Arc<Mutex<HashMap<String, BloomSwapTracker>>>,
 > = once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+#[derive(Default)]
+pub struct BloomWsConnectionState {
+    pub is_connected: bool,
+    pub last_success_at: Option<SystemTime>,
+}
+pub static BLOOM_WS_CONNECTION: once_cell::sync::Lazy<Arc<Mutex<BloomWsConnectionState>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(BloomWsConnectionState::default())));
 pub static HTTP_CLIENT: once_cell::sync::Lazy<ReqwestClient> = once_cell::sync::Lazy::new(|| {
     ReqwestClient::builder()
         .tcp_keepalive(Duration::from_secs(60))
@@ -114,7 +122,7 @@ async fn handle_commands(
 
 #[tokio::main]
 async fn main() {
-    pretty_env_logger::init();
+    logging::init();
     dotenv::dotenv().ok();
 
     rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
