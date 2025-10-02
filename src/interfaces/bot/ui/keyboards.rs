@@ -1,4 +1,4 @@
-use crate::interfaces::bot::data::{Task, UserConfig, Wallet};
+use crate::interfaces::bot::data::{BloomWalletInfo, Task, UserConfig, Wallet};
 use crate::interfaces::bot::ui::State;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
@@ -56,6 +56,11 @@ pub fn task_detail_keyboard(task: &Task) -> InlineKeyboardMarkup {
     buttons.push(vec![InlineKeyboardButton::callback(
         format!("📝 Task Name: {}", task.name),
         format!("task_name_{}", task.name),
+    )]);
+
+    buttons.push(vec![InlineKeyboardButton::callback(
+        "⚙️ Task Settings",
+        format!("task_settings_{}", task.name),
     )]);
 
     let telegram_text = if task.platform == Platform::Telegram {
@@ -293,6 +298,105 @@ pub fn wallets_menu_keyboard(wallets: &[Wallet], default_index: usize) -> Inline
     )]);
 
     InlineKeyboardMarkup::new(buttons)
+}
+
+pub fn task_settings_keyboard(task: &Task) -> InlineKeyboardMarkup {
+    let buttons = vec![
+        vec![InlineKeyboardButton::callback(
+            "🌸 Bloom Wallets",
+            format!("task_settings_wallets_{}", task.name),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "← Back to Task",
+            format!("task_detail_{}", task.name),
+        )],
+    ];
+    InlineKeyboardMarkup::new(buttons)
+}
+
+pub fn task_wallets_keyboard(
+    task_name: &str,
+    wallets: &[BloomWalletInfo],
+    selected_address: Option<&str>,
+    page: usize,
+) -> InlineKeyboardMarkup {
+    let start = page * ITEMS_PER_PAGE;
+    let end = (start + ITEMS_PER_PAGE).min(wallets.len());
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+
+    for (index, wallet) in wallets[start..end].iter().enumerate() {
+        let absolute_index = start + index;
+        let is_selected = selected_address
+            .map(|address| address == wallet.address.as_str())
+            .unwrap_or(false);
+        let icon = if is_selected { "✅" } else { "☑️" };
+        let short_address = shorten_wallet_address(&wallet.address);
+        let label = wallet
+            .label
+            .as_deref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| short_address.clone());
+        let display_text = if label == short_address {
+            label
+        } else {
+            format!("{} ({})", label, short_address)
+        };
+        let button_text = format!("{} {}", icon, display_text);
+        buttons.push(vec![InlineKeyboardButton::callback(
+            button_text,
+            format!(
+                "task_wallet_select:{}:{}:{}",
+                task_name, page, absolute_index
+            ),
+        )]);
+    }
+
+    if selected_address.is_some() {
+        buttons.push(vec![InlineKeyboardButton::callback(
+            "Clear Selection",
+            format!("task_wallet_clear:{}", task_name),
+        )]);
+    }
+
+    if wallets.len() > ITEMS_PER_PAGE {
+        let mut nav_row = Vec::new();
+        if page > 0 {
+            nav_row.push(InlineKeyboardButton::callback(
+                "< Prev",
+                format!("task_wallet_page:{}:{}", task_name, page - 1),
+            ));
+        }
+        if end < wallets.len() {
+            nav_row.push(InlineKeyboardButton::callback(
+                "Next >",
+                format!("task_wallet_page:{}:{}", task_name, page + 1),
+            ));
+        }
+        if !nav_row.is_empty() {
+            buttons.push(nav_row);
+        }
+    }
+
+    buttons.push(vec![InlineKeyboardButton::callback(
+        "← Back",
+        format!("task_settings_{}", task_name),
+    )]);
+
+    InlineKeyboardMarkup::new(buttons)
+}
+
+fn shorten_wallet_address(address: &str) -> String {
+    const PREFIX: usize = 6;
+    const SUFFIX: usize = 4;
+    if address.len() <= PREFIX + SUFFIX {
+        address.to_string()
+    } else {
+        let prefix = &address[..PREFIX];
+        let suffix = &address[address.len() - SUFFIX..];
+        format!("{}...{}", prefix, suffix)
+    }
 }
 
 pub fn settings_menu_keyboard() -> InlineKeyboardMarkup {

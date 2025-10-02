@@ -14,11 +14,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use url::Url;
-use urlencoding::encode;
 
 const BLOOM_WS_HOST: &str = "ws.bloom-ext.app";
 const BLOOM_EXTENSION_ORIGIN: &str = "chrome-extension://akdiolpnpplhaoedmednpobkhmkophmg";
-const BLOOM_WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36";
+const BLOOM_WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0";
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
@@ -64,8 +63,7 @@ async fn connect_once() -> Result<()> {
             return Err(anyhow!("BLOOM_AUTH_TOKEN environment variable not set"));
         }
     };
-    let encoded_token = encode(&token);
-    let url = match Url::parse(&format!("wss://{}?{}", BLOOM_WS_HOST, encoded_token)) {
+    let url = match Url::parse(&format!("wss://{}?{}", BLOOM_WS_HOST, token)) {
         Ok(parsed) => parsed,
         Err(err) => {
             mark_ws_offline();

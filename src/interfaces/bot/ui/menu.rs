@@ -119,6 +119,8 @@ pub async fn generate_task_detail_text(
         Platform::Discord => "Discord",
     };
 
+    let bloom_wallet_display = format_task_bloom_wallet(task);
+
     let platform_details = match task.platform {
         Platform::Telegram => {
             let channel_id_str = task
@@ -126,8 +128,9 @@ pub async fn generate_task_detail_text(
                 .first()
                 .map_or("Not Set".to_string(), |id| id.to_string());
             let channel_name_str = task.listen_channel_name.as_deref().unwrap_or("N/A");
-            let monitoring_str = if task.listen_users.is_empty() {
-                "All users (not filtered)".to_string()
+            let monitoring_str = if task.listen_users.is_empty() && task.listen_usernames.is_empty()
+            {
+                "Not Set".to_string()
             } else if !task.listen_usernames.is_empty() {
                 format!(
                     "{} users: {}",
@@ -162,7 +165,7 @@ pub async fn generate_task_detail_text(
             };
             let users_count = task.discord_users.len();
             let users_str = if users_count == 0 {
-                "All users (not filtered)".to_string()
+                "Not Set".to_string()
             } else {
                 format!("{} users: {}", users_count, task.discord_users.join(", "))
             };
@@ -184,6 +187,8 @@ pub async fn generate_task_detail_text(
 \
         📊 *Platform:* `{}`\n
 \
+        💼 *Bloom Wallet:* `{}`\n
+\
         {}\n
 \
         📝 *Blacklist Words:* `{}`\n
@@ -202,12 +207,34 @@ pub async fn generate_task_detail_text(
         *🔴: The feature/mode is turned OFF*",
         escape_markdown(&task.name),
         escape_markdown(platform_str),
+        escape_markdown(&bloom_wallet_display),
         platform_details,
         escape_markdown(&blacklist_str),
         escape_markdown(&task.buy_amount_sol.to_string()),
         escape_markdown(&task.buy_priority_fee_sol.to_string()),
         escape_markdown(&task.buy_slippage_percent.to_string()),
         inform_only_line
+    )
+}
+
+pub async fn generate_task_settings_text(
+    _redis_client: RedisClient,
+    _chat_id: i64,
+    task: &Task,
+) -> String {
+    let bloom_wallet_display = format_task_bloom_wallet(task);
+    format!(
+        "⚙️ *Task Settings: {}*\n\n💼 *Bloom Wallet:* `{}`\n\nChoose an option below to configure this task\\.",
+        escape_markdown(&task.name),
+        escape_markdown(&bloom_wallet_display)
+    )
+}
+
+pub fn generate_task_wallets_text(task: &Task, current_display: &str) -> String {
+    format!(
+        "👛 *Bloom Wallets: {}*\n\nCurrent selection: `{}`\n\nSelect a wallet below to assign it to this task\\.",
+        escape_markdown(&task.name),
+        escape_markdown(current_display)
     )
 }
 
@@ -256,5 +283,34 @@ pub async fn generate_settings_text(redis_client: RedisClient, chat_id: i64) -> 
             )
         }
         _ => "⚠️ Could not load settings. Please run /start again.".to_string(),
+    }
+}
+
+fn format_task_bloom_wallet(task: &Task) -> String {
+    if let Some(wallet) = task.bloom_wallet.as_ref() {
+        return format_wallet_label(wallet.label.as_deref(), &wallet.address);
+    }
+    "Not set".to_string()
+}
+
+fn format_wallet_label(label: Option<&str>, address: &str) -> String {
+    let trimmed_label = label.map(|value| value.trim()).unwrap_or("");
+    let short_address = shorten_pubkey(address);
+    if trimmed_label.is_empty() {
+        short_address
+    } else {
+        format!("{} ({})", trimmed_label, short_address)
+    }
+}
+
+fn shorten_pubkey(pubkey: &str) -> String {
+    const PREFIX: usize = 6;
+    const SUFFIX: usize = 4;
+    if pubkey.len() <= PREFIX + SUFFIX {
+        pubkey.to_string()
+    } else {
+        let prefix = &pubkey[..PREFIX];
+        let suffix = &pubkey[pubkey.len() - SUFFIX..];
+        format!("{}...{}", prefix, suffix)
     }
 }

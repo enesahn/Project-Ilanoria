@@ -20,6 +20,13 @@ pub struct Wallet {
     pub private_key: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BloomWalletInfo {
+    pub address: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UserConfig {
     pub slippage_percent: u32,
@@ -47,6 +54,8 @@ pub struct Task {
     pub buy_slippage_percent: u32,
     pub blacklist_words: Vec<String>,
     pub inform_only: bool,
+    #[serde(default)]
+    pub bloom_wallet: Option<BloomWalletInfo>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

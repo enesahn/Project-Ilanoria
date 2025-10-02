@@ -198,9 +198,7 @@ impl MenuManager {
                         datetime.format("%Y-%m-%d %H:%M:%S")
                     )
                 })
-                .unwrap_or_else(|| {
-                    "Bloom WebSocket handshake validated".to_string()
-                });
+                .unwrap_or_else(|| "Bloom WebSocket handshake validated".to_string());
             ConsoleUI::print_info(&detail);
         }
         println!();

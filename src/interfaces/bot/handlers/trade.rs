@@ -279,6 +279,12 @@ pub async fn run_trade_in_blocking_task(
     };
 
     let wallet_public_key = default_wallet.public_key.clone();
+    let wallet_label = default_wallet.name.trim().to_string();
+    let wallet_label = if wallet_label.is_empty() {
+        "Default Wallet".to_string()
+    } else {
+        wallet_label
+    };
 
     let priority_fee = match &cmd {
         Command::Buy(..) => user_data.config.buy_priority_fee_sol,
@@ -309,7 +315,8 @@ pub async fn run_trade_in_blocking_task(
                 amount,
                 slippage_percent,
                 priority_fee,
-                &wallet_public_key,
+                wallet_public_key.as_str(),
+                wallet_label.as_str(),
             )
             .await;
 
@@ -421,7 +428,8 @@ pub async fn run_trade_in_blocking_task(
                 token_amount,
                 slippage_percent,
                 priority_fee,
-                &wallet_public_key,
+                wallet_public_key.as_str(),
+                wallet_label.as_str(),
             )
             .await;
 

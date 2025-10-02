@@ -10,7 +10,8 @@ async fn execute_swap(
     amount: f64,
     slippage_percent: u32,
     priority_fee: f64,
-    _wallet_address: &str,
+    wallet_address: &str,
+    wallet_label: &str,
     side: &str,
 ) -> Result<()> {
     let auth_token = std::env::var("BLOOM_AUTH_TOKEN")
@@ -44,9 +45,8 @@ async fn execute_swap(
         dev_sell: None,
         amount_type: "exact_in",
         wallets: vec![BloomWallet {
-            // it's need to be hardcoded. DON'T CHANGE THAT.
-            address: "5zsdFixcN3D67AXBrNeHjW49tgkQ3VmdtTKA8DMxLuub",
-            label: "yoomain",
+            address: wallet_address,
+            label: wallet_label,
         }],
     };
 
@@ -85,6 +85,7 @@ pub async fn buy(
     slippage_percent: u32,
     priority_fee: f64,
     wallet_address: &str,
+    wallet_label: &str,
 ) -> Result<()> {
     execute_swap(
         mint_address,
@@ -92,6 +93,7 @@ pub async fn buy(
         slippage_percent,
         priority_fee,
         wallet_address,
+        wallet_label,
         "Buy",
     )
     .await
@@ -103,6 +105,7 @@ pub async fn sell(
     slippage_percent: u32,
     priority_fee: f64,
     wallet_address: &str,
+    wallet_label: &str,
 ) -> Result<()> {
     execute_swap(
         mint_address,
@@ -110,6 +113,7 @@ pub async fn sell(
         slippage_percent,
         priority_fee,
         wallet_address,
+        wallet_label,
         "Sell",
     )
     .await

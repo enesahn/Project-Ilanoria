@@ -1,3 +1,4 @@
+use crate::interfaces::bot::data::BloomWalletInfo;
 use teloxide::types::MessageId;
 
 #[derive(Clone, Default)]
@@ -7,6 +8,16 @@ pub enum State {
     SettingsMenu,
     WalletsMenu,
     TasksMenu,
+    TaskSettingsMenu {
+        _task_name: String,
+        _menu_message_id: MessageId,
+    },
+    TaskSelectBloomWallet {
+        task_name: String,
+        menu_message_id: MessageId,
+        wallets: Vec<BloomWalletInfo>,
+        page: usize,
+    },
     TaskSelectChannelSearch {
         task_name: String,
         menu_message_id: MessageId,

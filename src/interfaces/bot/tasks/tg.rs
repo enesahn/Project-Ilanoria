@@ -2,7 +2,7 @@ use crate::BloomBuyAck;
 use crate::infrastructure::blockchain::bloom_buy;
 use crate::interfaces::bot::core::update_bus;
 use crate::interfaces::bot::escape_markdown;
-use crate::interfaces::bot::tasks::{append_task_log, state};
+use crate::interfaces::bot::tasks::{append_task_log, resolve_task_wallet, state};
 use crate::interfaces::bot::{Task, UserData, log_buffer_to_ca_detection};
 use crate::{PENDING_BLOOM_RESPONSES, USER_CLIENT_HANDLE};
 use chrono::Local;
@@ -217,6 +217,7 @@ async fn process_message(
         .cloned()
         .collect();
     let blacklist_check_us = t_blacklist.elapsed().as_micros();
+    let blacklist_ms = (blacklist_check_us as f64 / 1000.0).max(0.01);
     log::info!(
         "perf.blacklist_check_us={} hit={}",
         blacklist_check_us,
@@ -277,6 +278,19 @@ async fn process_message(
     let used_llm = log_buffer
         .iter()
         .any(|s| s.contains("Falling back to Groq LLM"));
+    let ca_extract_ms = (ca_extract_us as f64 / 1000.0).max(0.01);
+    let llm_flag = if used_llm { "yes" } else { "no" };
+    let detection_summary = match mint_opt.as_ref() {
+        Some(_) => format!(
+            "CA detection completed in {:.2} ms (LLM fallback: {})",
+            ca_extract_ms, llm_flag
+        ),
+        None => format!(
+            "CA detection completed in {:.2} ms (LLM fallback: {}) - no mint found",
+            ca_extract_ms, llm_flag
+        ),
+    };
+    log_task_event(chat_id, &task_name, detection_summary);
     log::info!(
         "perf.ca_extract_us={} ca.used_llm={} msg_id={}",
         ca_extract_us,
@@ -309,6 +323,16 @@ async fn process_message(
             dedup_us,
             if is_dup { 1 } else { 0 }
         );
+        let dedup_ms = (dedup_us as f64 / 1000.0).max(0.01);
+        log_task_event(
+            chat_id,
+            &task_name,
+            format!(
+                "CA deduplication completed in {:.2} ms (duplicate: {})",
+                dedup_ms,
+                if is_dup { "yes" } else { "no" }
+            ),
+        );
         if is_dup {
             log::info!("perf.duplicate_ca=1 mint={}", mint);
             log_task_event(
@@ -322,9 +346,6 @@ async fn process_message(
         if task.inform_only {
             let time_str = escape_markdown(&Local::now().format("%H:%M:%S").to_string());
             let total_ms = t_all_start.elapsed().as_millis();
-            let blacklist_ms = (blacklist_check_us as f64 / 1000.0).max(0.01);
-            let ca_extract_ms = (ca_extract_us as f64 / 1000.0).max(0.01);
-            let dedup_ms = (dedup_us as f64 / 1000.0).max(0.01);
 
             let header = format!("🔍 *Token Detected \\| {}*", time_str);
             let mint_line = format!("🪙 `{}`", escape_markdown(&mint));
@@ -368,12 +389,21 @@ async fn process_message(
             log_task_event(
                 chat_id,
                 &task_name,
+                format!(
+                    "Processing timings -> blacklist: {:.2} ms | CA detection: {:.2} ms | dedup: {:.2} ms | total: {} ms",
+                    blacklist_ms, ca_extract_ms, dedup_ms, total_ms
+                ),
+            );
+            log_task_event(
+                chat_id,
+                &task_name,
                 format!("Inform-only alert dispatched for mint {}", mint),
             );
             send_notification_markdown(chat_id, notification).await;
         } else {
             if let Some(user_data) = user_data_option {
-                if let Some(wallet) = user_data.get_default_wallet() {
+                if let Some((wallet_address, wallet_label)) = resolve_task_wallet(&task, &user_data)
+                {
                     let (tx, rx) = oneshot::channel();
                     PENDING_BLOOM_RESPONSES.lock().insert(mint.clone(), tx);
 
@@ -383,11 +413,13 @@ async fn process_message(
                         task.buy_amount_sol,
                         task.buy_slippage_percent,
                         task.buy_priority_fee_sol,
-                        &wallet.public_key,
+                        wallet_address.as_str(),
+                        wallet_label.as_str(),
                     )
                     .await;
                     let api_duration = api_request_start_time.elapsed();
                     let api_us = api_duration.as_micros();
+                    let api_ms = (api_us as f64 / 1000.0).max(0.01);
                     log_task_event(
                         chat_id,
                         &task_name,
@@ -421,6 +453,16 @@ async fn process_message(
                                         ack_wait_us,
                                         total_us,
                                         mint
+                                    );
+                                    let ack_wait_ms = (ack_wait_us as f64 / 1000.0).max(0.01);
+                                    let total_ms = (total_us as f64 / 1000.0).max(0.01);
+                                    log_task_event(
+                                        chat_id,
+                                        &task_name,
+                                        format!(
+                                            "Bloom buy timings -> API: {:.2} ms | ACK: {:.2} ms (success) | Pipeline total: {:.2} ms",
+                                            api_ms, ack_wait_ms, total_ms
+                                        ),
                                     );
                                     if let Some(signature) = signature_opt {
                                         log_task_event(
@@ -458,6 +500,16 @@ async fn process_message(
                                         total_us,
                                         mint
                                     );
+                                    let ack_wait_ms = (ack_wait_us as f64 / 1000.0).max(0.01);
+                                    let total_ms = (total_us as f64 / 1000.0).max(0.01);
+                                    log_task_event(
+                                        chat_id,
+                                        &task_name,
+                                        format!(
+                                            "Bloom buy timings -> API: {:.2} ms | ACK: {:.2} ms (channel closed) | Pipeline total: {:.2} ms",
+                                            api_ms, ack_wait_ms, total_ms
+                                        ),
+                                    );
                                     log_task_event(
                                         chat_id,
                                         &task_name,
@@ -486,6 +538,16 @@ async fn process_message(
                                         total_us,
                                         mint
                                     );
+                                    let ack_wait_ms = (ack_wait_us as f64 / 1000.0).max(0.01);
+                                    let total_ms = (total_us as f64 / 1000.0).max(0.01);
+                                    log_task_event(
+                                        chat_id,
+                                        &task_name,
+                                        format!(
+                                            "Bloom buy timings -> API: {:.2} ms | ACK: {:.2} ms (timeout) | Pipeline total: {:.2} ms",
+                                            api_ms, ack_wait_ms, total_ms
+                                        ),
+                                    );
                                     log_task_event(
                                         chat_id,
                                         &task_name,
@@ -508,6 +570,15 @@ async fn process_message(
                                 e,
                                 mint
                             );
+                            let total_ms = (total_us as f64 / 1000.0).max(0.01);
+                            log_task_event(
+                                chat_id,
+                                &task_name,
+                                format!(
+                                    "Bloom buy timings -> API: {:.2} ms | Pipeline total: {:.2} ms (failure)",
+                                    api_ms, total_ms
+                                ),
+                            );
                             log_task_event(
                                 chat_id,
                                 &task_name,
@@ -523,14 +594,13 @@ async fn process_message(
                     }
                 } else {
                     let total_us = t_all_start.elapsed().as_micros();
-                    log::info!("perf.total_us={} no_default_wallet=1", total_us);
+                    log::info!("perf.total_us={} no_bloom_wallet=1", total_us);
                     let no_wallet_msg =
-                        "❌ *Buy Error*\n\nNo default wallet found for auto\\-buy task\\."
-                            .to_string();
+                        "❌ *Buy Error*\n\nNo Bloom wallet configured for this task.".to_string();
                     log_task_event(
                         chat_id,
                         &task_name,
-                        "Bloom buy skipped: no default wallet configured".to_string(),
+                        "Bloom buy skipped: no Bloom wallet configured".to_string(),
                     );
                     send_notification_markdown(chat_id, no_wallet_msg).await;
                 }
