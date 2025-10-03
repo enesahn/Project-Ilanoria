@@ -3,15 +3,11 @@ use redis::Client as RedisClient;
 use std::sync::Arc;
 use teloxide::prelude::*;
 
-use super::text::{
-    format_token_info_message, get_parsed_token_info, parse_mint_from_text_robust,
-};
+use super::text::{format_token_info_message, get_parsed_token_info, parse_mint_from_text_robust};
 use crate::application::pricing::SolPriceState;
 use crate::infrastructure::blockchain::RpcClients;
 use crate::interfaces::bot::user::client::UserClientHandle;
-use crate::interfaces::bot::{
-    State, get_user_data, send_cleanup_msg, token_info_keyboard,
-};
+use crate::interfaces::bot::{State, send_cleanup_msg, token_info_keyboard};
 
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 type MyDialogue = Dialogue<State, teloxide::dispatching::dialogue::InMemStorage<State>>;
@@ -47,24 +43,19 @@ pub async fn handle_trade_callback(
                         )
                         .await;
 
-                        let mut con = redis_client.get_multiplexed_async_connection().await?;
-                        if let Some(user_data) = get_user_data(&mut con, chat_id.0).await? {
-                            let keyboard = token_info_keyboard(&user_data.config, &mint);
-                            if let Err(err) = bot
-                                .edit_message_text(chat_id, message.id, new_text)
-                                .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-                                .disable_web_page_preview(true)
-                                .reply_markup(keyboard)
-                                .await
-                            {
-                                if !matches!(
-                                    err,
-                                    teloxide::RequestError::Api(
-                                        teloxide::ApiError::MessageNotModified
-                                    )
-                                ) {
-                                    return Err(Box::new(err));
-                                }
+                        let keyboard = token_info_keyboard(&mint);
+                        if let Err(err) = bot
+                            .edit_message_text(chat_id, message.id, new_text)
+                            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                            .disable_web_page_preview(true)
+                            .reply_markup(keyboard)
+                            .await
+                        {
+                            if !matches!(
+                                err,
+                                teloxide::RequestError::Api(teloxide::ApiError::MessageNotModified)
+                            ) {
+                                return Err(Box::new(err));
                             }
                         }
                     }

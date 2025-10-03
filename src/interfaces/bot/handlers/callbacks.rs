@@ -5,10 +5,11 @@ use teloxide::prelude::*;
 
 use crate::application::pricing::SolPriceState;
 use crate::infrastructure::blockchain::RpcClients;
+use crate::interfaces::bot::handlers::tasks::get_tasks;
 use crate::interfaces::bot::user::client::UserClientHandle;
-use crate::interfaces::bot::{State, generate_main_menu_text, main_menu_keyboard};
+use crate::interfaces::bot::{State, generate_tasks_text, tasks_menu_keyboard};
 
-use super::{settings, tasks, trade, wallets};
+use super::{tasks, trade};
 
 type MyDialogue = Dialogue<State, teloxide::dispatching::dialogue::InMemStorage<State>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -37,15 +38,7 @@ pub async fn callback_handler(
             return Ok(());
         }
 
-        let wallet_actions = [
-            "view_wallets",
-            "create_wallet",
-            "import_wallet",
-            "set_default_",
-            "remove_wallet_",
-        ];
         let trade_actions = ["r"];
-        let settings_actions = ["view_cfg", "edit_slippage"];
 
         if data.starts_with("task_") || data == "view_tasks" || data == "create_task" {
             tasks::handle_task_callbacks(
@@ -57,11 +50,6 @@ pub async fn callback_handler(
                 user_client_handle.clone(),
             )
             .await?;
-        } else if wallet_actions
-            .iter()
-            .any(|&action| data.starts_with(action))
-        {
-            wallets::callback_handler(q.clone(), bot.clone(), redis_client, dialogue).await?;
         } else if trade_actions.iter().any(|&action| data.starts_with(action)) {
             trade::handle_trade_callback(
                 q.clone(),
@@ -73,44 +61,14 @@ pub async fn callback_handler(
                 rpc_clients,
             )
             .await?;
-        } else if settings_actions
-            .iter()
-            .any(|&action| data.starts_with(action))
-        {
-            settings::handle_settings_callback(q.clone(), bot.clone(), redis_client, dialogue)
-                .await?;
         } else if data == "main_menu" {
-            let menu_text = generate_main_menu_text(
-                redis_client.clone(),
-                chat_id.0,
-                sol_price_state,
-                rpc_clients,
-            )
-            .await;
-            bot.edit_message_text(chat_id, message.id, menu_text)
+            let tasks_text = generate_tasks_text(redis_client.clone(), chat_id.0).await;
+            let tasks = get_tasks(redis_client.clone(), chat_id.0).await;
+            bot.edit_message_text(chat_id, message.id, tasks_text)
                 .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-                .reply_markup(main_menu_keyboard())
+                .reply_markup(tasks_menu_keyboard(&tasks))
                 .await?;
-            dialogue.update(State::Start).await?;
-        } else if data == "refresh_main" {
-            let menu_text = generate_main_menu_text(
-                redis_client.clone(),
-                chat_id.0,
-                sol_price_state,
-                rpc_clients,
-            )
-            .await;
-            match bot
-                .edit_message_text(chat_id, message.id, menu_text)
-                .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-                .reply_markup(main_menu_keyboard())
-                .await
-            {
-                Ok(_) => {}
-                Err(teloxide::RequestError::Api(teloxide::ApiError::MessageNotModified)) => {}
-                Err(e) => return Err(Box::new(e)),
-            }
-            dialogue.update(State::Start).await?;
+            dialogue.update(State::TasksMenu).await?;
         }
 
         bot.answer_callback_query(q.id).await?;

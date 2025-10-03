@@ -4,7 +4,7 @@ use reqwest::Client as ReqwestClient;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use teloxide::{dispatching::dialogue::InMemStorage, prelude::*};
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 
@@ -54,10 +54,24 @@ pub static ACTIVE_TASK_SESSIONS: once_cell::sync::Lazy<
 pub static ACTIVE_BLOOM_SWAPS: once_cell::sync::Lazy<
     Arc<Mutex<HashMap<String, BloomSwapTracker>>>,
 > = once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BloomWsConnectionStatus {
+    Connecting,
+    Connected,
+    Disconnected,
+    Unavailable,
+}
+
+impl Default for BloomWsConnectionStatus {
+    fn default() -> Self {
+        BloomWsConnectionStatus::Connecting
+    }
+}
+
 #[derive(Default)]
 pub struct BloomWsConnectionState {
-    pub is_connected: bool,
-    pub last_success_at: Option<SystemTime>,
+    pub status: BloomWsConnectionStatus,
+    pub message: String,
 }
 pub static BLOOM_WS_CONNECTION: once_cell::sync::Lazy<Arc<Mutex<BloomWsConnectionState>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(BloomWsConnectionState::default())));
@@ -243,10 +257,7 @@ async fn main() {
         .enter_dialogue::<Message, InMemStorage<State>, State>()
         .branch(
             dptree::filter_map(|state: State| match state {
-                State::ReceiveSlippage { .. }
-                | State::ReceiveImportKey { .. }
-                | State::ReceiveWalletName { .. }
-                | State::TaskSelectChannelSearch { .. } => Some(()),
+                State::TaskSelectChannelSearch { .. } => Some(()),
                 _ => None,
             })
             .endpoint(text_handler),

@@ -1,4 +1,3 @@
-use crate::BLOOM_WS_CONNECTION;
 use crate::application::health::worker::{WarmerState, WarmupStatus};
 use crate::application::indexer::{
     IndexerMintLogEntry, indexer_mint_log_counters, ram_index_stats, recent_indexer_mint_logs,
@@ -8,15 +7,12 @@ use crate::infrastructure::logging::suppress_stdout_logs;
 use crate::interfaces::bot::data::storage::get_user_tasks;
 use crate::interfaces::bot::tasks::subscribe_task_logs;
 use crate::interfaces::bot::user::client::{UserClientHandle, create_user_client};
-use crate::interfaces::bot::{
-    clear_user_logs, clear_user_tx_log, get_all_user_ids, get_tx_logs, get_user_logs,
-    get_user_tx_signatures,
-};
+use crate::interfaces::bot::{clear_user_logs, get_all_user_ids, get_user_logs};
 use crate::interfaces::console::console::ConsoleUI;
-use chrono::{DateTime, Local, SecondsFormat, Utc};
+use crate::{BLOOM_WS_CONNECTION, BloomWsConnectionStatus};
+use chrono::{DateTime, Local, SecondsFormat};
 use colored::*;
 use parking_lot::Mutex;
-use regex::Regex;
 use std::io::Write as _;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
@@ -33,24 +29,11 @@ enum MenuState {
     ServerLogsUserList,
     UserLogTypeSelection { user_id: i64 },
     GlobalLogsUserDetail { user_id: i64, page: usize },
-    TxLogList { user_id: i64, page: usize },
-    TxPerformanceSummary { user_id: i64, signature: String },
-    TxRawLogs { user_id: i64, signature: String },
     UserTaskLogList { user_id: i64 },
     TaskLiveLogs { user_id: i64, task_name: String },
     IndexerLiveLogs,
     RedisIndex,
     Exiting,
-}
-
-#[derive(Default, Debug)]
-struct PerformanceMetrics {
-    blockhash_fetch_ms: Option<f64>,
-    dex_params_fetch_ms: Option<f64>,
-    preparation_ms: Option<f64>,
-    submission_ms: Option<f64>,
-    confirmation_ms: Option<f64>,
-    total_duration_ms: Option<f64>,
 }
 
 pub struct MenuManager {
@@ -60,29 +43,6 @@ pub struct MenuManager {
     user_client_handle: Arc<Mutex<Option<UserClientHandle>>>,
     client_sender: mpsc::Sender<grammers_client::Client>,
     skip_input_cycle: bool,
-}
-
-struct TxDisplayInfo {
-    details: String,
-    fee: String,
-}
-
-fn format_token_amount(raw_amount: u64, decimals: u8) -> String {
-    let divisor = 10f64.powi(decimals as i32);
-    if divisor == 0.0 {
-        return raw_amount.to_string();
-    }
-    let amount = raw_amount as f64 / divisor;
-    if amount >= 1_000_000_000.0 {
-        format!("{:.2}B", amount / 1_000_000_000.0)
-    } else if amount >= 1_000_000.0 {
-        format!("{:.2}M", amount / 1_000_000.0)
-    } else if amount >= 1_000.0 {
-        format!("{:.2}K", amount / 1_000.0)
-    } else {
-        let s = format!("{:.6}", amount);
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
 }
 
 impl MenuManager {
@@ -130,16 +90,6 @@ impl MenuManager {
             MenuState::GlobalLogsUserDetail { user_id, page } => {
                 self.display_global_logs_user_detail(*user_id, *page).await
             }
-            MenuState::TxLogList { user_id, page } => {
-                self.display_tx_log_list(*user_id, *page).await
-            }
-            MenuState::TxPerformanceSummary { user_id, signature } => {
-                self.display_tx_performance_summary(*user_id, signature)
-                    .await
-            }
-            MenuState::TxRawLogs { user_id, signature } => {
-                self.display_tx_raw_logs(*user_id, signature).await
-            }
             MenuState::UserTaskLogList { user_id } => {
                 self.display_user_task_log_list(*user_id).await
             }
@@ -183,11 +133,6 @@ impl MenuManager {
             MenuState::GlobalLogsUserDetail { .. } => {
                 self.handle_global_logs_user_detail_input(choice).await
             }
-            MenuState::TxLogList { .. } => self.handle_tx_log_list_input(choice).await,
-            MenuState::TxPerformanceSummary { .. } => {
-                self.handle_tx_performance_summary_input(choice).await
-            }
-            MenuState::TxRawLogs { .. } => self.handle_tx_raw_logs_input(choice).await,
             MenuState::UserTaskLogList { .. } => self.handle_user_task_log_list_input(choice).await,
             MenuState::TaskLiveLogs { .. } => {}
             MenuState::IndexerLiveLogs => {}
@@ -199,21 +144,34 @@ impl MenuManager {
     fn display_main_menu(&self) {
         ConsoleUI::print_header("Bot Control Panel");
         ConsoleUI::print_info("Telegram Bot is running in the background.");
-        let (is_connected, last_success_at) = {
+        let (status, message) = {
             let state = BLOOM_WS_CONNECTION.lock();
-            (state.is_connected, state.last_success_at)
+            (state.status, state.message.clone())
         };
-        if is_connected {
-            let detail = last_success_at
-                .map(|timestamp| {
-                    let datetime: DateTime<Utc> = DateTime::from(timestamp);
-                    format!(
-                        "Bloom WebSocket handshake validated at {} UTC",
-                        datetime.format("%Y-%m-%d %H:%M:%S")
-                    )
-                })
-                .unwrap_or_else(|| "Bloom WebSocket handshake validated".to_string());
-            ConsoleUI::print_info(&detail);
+
+        match status {
+            BloomWsConnectionStatus::Connected => {
+                let text = if message.trim().is_empty() {
+                    "Bloom WebSocket connection is healthy."
+                } else {
+                    message.trim()
+                };
+                println!("  {} {}", "✓".bright_green().bold(), text.bright_green());
+            }
+            BloomWsConnectionStatus::Connecting => {
+                if message.trim().is_empty() {
+                    ConsoleUI::print_info("Bloom WebSocket connection is starting up.");
+                } else {
+                    ConsoleUI::print_info(message.trim());
+                }
+            }
+            BloomWsConnectionStatus::Unavailable | BloomWsConnectionStatus::Disconnected => {
+                if message.trim().is_empty() {
+                    ConsoleUI::print_warning("Bloom WebSocket connection is unavailable.");
+                } else {
+                    ConsoleUI::print_warning(message.trim());
+                }
+            }
         }
         println!();
         ConsoleUI::print_option(1, "Server Logs");
@@ -616,8 +574,7 @@ impl MenuManager {
     fn display_user_log_type_selection(&self, user_id: i64) {
         ConsoleUI::print_header(&format!("Logs for User ID: {}", user_id));
         ConsoleUI::print_option(1, "See Global Logs");
-        ConsoleUI::print_option(2, "See User TX Logs");
-        ConsoleUI::print_option(3, "See User Task Logs");
+        ConsoleUI::print_option(2, "See User Task Logs");
         println!();
         ConsoleUI::print_exit_option('0', "Back to User List");
         ConsoleUI::print_refresh_hint();
@@ -628,8 +585,7 @@ impl MenuManager {
         if let MenuState::UserLogTypeSelection { user_id } = self.state {
             match input {
                 "1" => self.state = MenuState::GlobalLogsUserDetail { user_id, page: 0 },
-                "2" => self.state = MenuState::TxLogList { user_id, page: 0 },
-                "3" => self.state = MenuState::UserTaskLogList { user_id },
+                "2" => self.state = MenuState::UserTaskLogList { user_id },
                 "0" => self.state = MenuState::ServerLogsUserList,
                 _ => {}
             }
@@ -747,281 +703,6 @@ impl MenuManager {
         }
     }
 
-    fn parse_tx_details_from_logs(&self, logs: &[String]) -> TxDisplayInfo {
-        let mut details = "N/A".to_string();
-        let mut fee = "N/A".to_string();
-        let mut decimals: Option<u8> = None;
-        let details_re = Regex::new(r"DETAILS: (Buy ([\d.]+) SOL|Sell ([\d]+) Tokens)").unwrap();
-        let fee_re = Regex::new(r"FEE: ([\d.]+) SOL").unwrap();
-        let decimals_re = Regex::new(r"DECIMALS: (\d+)").unwrap();
-        for log in logs {
-            if let Some(caps) = decimals_re.captures(log) {
-                if let Some(d_str) = caps.get(1) {
-                    decimals = d_str.as_str().parse::<u8>().ok();
-                }
-            }
-        }
-        for log in logs {
-            if let Some(caps) = details_re.captures(log) {
-                if let Some(buy_amount_str) = caps.get(2) {
-                    details = format!("Buy {} SOL", buy_amount_str.as_str());
-                } else if let Some(sell_amount_str) = caps.get(3) {
-                    if let Ok(amount) = sell_amount_str.as_str().parse::<u64>() {
-                        let corrected_amount = amount * 1000;
-                        details = format!(
-                            "Sell {} Tokens",
-                            format_token_amount(corrected_amount, decimals.unwrap_or(9))
-                        );
-                    }
-                }
-            }
-            if let Some(caps) = fee_re.captures(log) {
-                if let Some(fee_amount_str) = caps.get(1) {
-                    fee = fee_amount_str.as_str().to_string();
-                }
-            }
-        }
-        if fee != "N/A" {
-            fee = format!("{} SOL", fee);
-        }
-        TxDisplayInfo { details, fee }
-    }
-
-    async fn display_tx_log_list(&self, user_id: i64, page: usize) {
-        ConsoleUI::print_header(&format!("TX Logs for User ID: {}", user_id));
-        match get_user_tx_signatures(&self.redis_url, user_id).await {
-            Ok(mut signatures) => {
-                if signatures.is_empty() {
-                    ConsoleUI::print_info("No transaction logs found for this user.");
-                } else {
-                    signatures.sort();
-                    signatures.reverse();
-                    let items_per_page = 10;
-                    let total_items = signatures.len();
-                    let total_pages = (total_items as f64 / items_per_page as f64).ceil() as usize;
-                    let current_page = std::cmp::min(page, std::cmp::max(1, total_pages) - 1);
-                    let start = current_page * items_per_page;
-                    let end = std::cmp::min(start + items_per_page, total_items);
-                    println!();
-                    println!(
-                        "  {:<4} {:<35} {:<25} {}",
-                        "ID".cyan(),
-                        "SIGNATURE".cyan(),
-                        "DETAILS".cyan(),
-                        "USED FEE".cyan()
-                    );
-                    println!("  {}", "─".repeat(85));
-                    if start >= total_items && total_items > 0 {
-                        ConsoleUI::print_info("No more transactions.");
-                    } else {
-                        let paginated_sigs = &signatures[start..end];
-                        for (i, sig) in paginated_sigs.iter().enumerate() {
-                            let display_sig = format!("{}...", &sig[..15]);
-                            let logs = get_tx_logs(&self.redis_url, user_id, sig)
-                                .await
-                                .unwrap_or_default();
-                            let info = self.parse_tx_details_from_logs(&logs);
-                            println!(
-                                "  {:<4} {:<35} {:<25} {}",
-                                format!("[{}]", i + 1).blue(),
-                                display_sig.white(),
-                                info.details.yellow(),
-                                info.fee.white()
-                            );
-                        }
-                    }
-                    println!();
-                    ConsoleUI::print_info(&format!(
-                        "Page {}/{}",
-                        current_page + 1,
-                        std::cmp::max(1, total_pages)
-                    ));
-                }
-            }
-            Err(e) => {
-                ConsoleUI::print_error(&format!("Failed to fetch transaction signatures: {}", e))
-            }
-        }
-        println!();
-        println!(
-            "  {} {}",
-            "»".bright_cyan(),
-            "Enter number to view • [n] next • [p] prev • [0] back".truecolor(150, 150, 150)
-        );
-        ConsoleUI::print_refresh_hint();
-        ConsoleUI::print_prompt();
-    }
-
-    async fn handle_tx_log_list_input(&mut self, input: &str) {
-        if let MenuState::TxLogList { user_id, page } = self.state {
-            match input.to_lowercase().as_str() {
-                "0" => self.state = MenuState::UserLogTypeSelection { user_id },
-                "n" => {
-                    self.state = MenuState::TxLogList {
-                        user_id,
-                        page: page + 1,
-                    }
-                }
-                "p" => {
-                    let new_page = if page > 0 { page - 1 } else { 0 };
-                    self.state = MenuState::TxLogList {
-                        user_id,
-                        page: new_page,
-                    };
-                }
-                _ => {
-                    if let Ok(choice) = input.parse::<usize>() {
-                        if choice > 0 {
-                            if let Ok(mut signatures) =
-                                get_user_tx_signatures(&self.redis_url, user_id).await
-                            {
-                                signatures.sort();
-                                signatures.reverse();
-                                let items_per_page = 10;
-                                let page_relative_index = choice - 1;
-                                if page_relative_index < items_per_page {
-                                    let absolute_index =
-                                        page * items_per_page + page_relative_index;
-                                    if let Some(signature) = signatures.get(absolute_index) {
-                                        self.state = MenuState::TxPerformanceSummary {
-                                            user_id,
-                                            signature: signature.clone(),
-                                        };
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn calculate_performance_metrics_measured(&self, logs: &[String]) -> PerformanceMetrics {
-        let mut metrics = PerformanceMetrics::default();
-        let re = Regex::new(r#"PERF_METRIC::\{ "stage": "([^"]+)", "duration_ms": ([\d.]+) \}"#)
-            .unwrap();
-        for log in logs {
-            if let Some(caps) = re.captures(log) {
-                let stage = &caps[1];
-                if let Ok(duration) = caps[2].parse::<f64>() {
-                    match stage {
-                        "blockhash_fetch" => metrics.blockhash_fetch_ms = Some(duration),
-                        "dex_params_fetch" => metrics.dex_params_fetch_ms = Some(duration),
-                        "preparation" => metrics.preparation_ms = Some(duration),
-                        "submission" => metrics.submission_ms = Some(duration),
-                        "confirmation" => metrics.confirmation_ms = Some(duration),
-                        "total_duration" => metrics.total_duration_ms = Some(duration),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        metrics
-    }
-
-    async fn display_tx_performance_summary(&self, user_id: i64, signature: &str) {
-        let short_signature = if signature.len() > 15 {
-            format!("{}...", &signature[..15])
-        } else {
-            signature.to_string()
-        };
-        ConsoleUI::print_header(&format!("Performance for TX: {}", short_signature));
-        match get_tx_logs(&self.redis_url, user_id, signature).await {
-            Ok(logs) => {
-                if logs.is_empty() {
-                    ConsoleUI::print_info("No logs found for this transaction to analyze.");
-                } else {
-                    let metrics = self.calculate_performance_metrics_measured(&logs);
-                    println!(
-                        "  {:<35} {}",
-                        "Metric".cyan().bold(),
-                        "Duration".cyan().bold()
-                    );
-                    println!("  {}", "─".repeat(50));
-                    let display_metric = |label: &str, value: Option<f64>| {
-                        let val_str = value
-                            .map(|v| format!("{:.4} ms", v))
-                            .unwrap_or_else(|| "N/A".to_string());
-                        println!("  {:<35} {}", label.white(), val_str.green());
-                    };
-                    display_metric("Blockhash Fetch Time:", metrics.blockhash_fetch_ms);
-                    display_metric("DEX Parameters Fetch Time:", metrics.dex_params_fetch_ms);
-                    display_metric("Preparation Time:", metrics.preparation_ms);
-                    display_metric("Submission (HTTP) Time:", metrics.submission_ms);
-                    display_metric("Confirmation (RPC) Time:", metrics.confirmation_ms);
-                    println!("  {}", "─".repeat(50));
-                    let total_val = metrics
-                        .total_duration_ms
-                        .map(|v| format!("{:.4} ms", v))
-                        .unwrap_or_else(|| "N/A".to_string());
-                    println!(
-                        "  {:<35} {}",
-                        "Total Measured Duration:".white().bold(),
-                        total_val.yellow().bold()
-                    );
-                }
-            }
-            Err(e) => ConsoleUI::print_error(&format!("Failed to fetch logs: {}", e)),
-        }
-        println!();
-        ConsoleUI::print_option(1, "See Raw TX Logs");
-        println!();
-        ConsoleUI::print_exit_option('0', "Back to TX List");
-        ConsoleUI::print_refresh_hint();
-        ConsoleUI::print_prompt();
-    }
-
-    async fn handle_tx_performance_summary_input(&mut self, input: &str) {
-        if let MenuState::TxPerformanceSummary {
-            user_id,
-            ref signature,
-        } = self.state
-        {
-            match input {
-                "1" => {
-                    self.state = MenuState::TxRawLogs {
-                        user_id,
-                        signature: signature.clone(),
-                    }
-                }
-                "0" => self.state = MenuState::TxLogList { user_id, page: 0 },
-                _ => {}
-            }
-        }
-    }
-
-    async fn display_tx_raw_logs(&self, user_id: i64, signature: &str) {
-        let short_signature = if signature.len() > 15 {
-            format!("{}...", &signature[..15])
-        } else {
-            signature.to_string()
-        };
-        ConsoleUI::print_header(&format!("Raw Logs for TX: {}", short_signature));
-        match get_tx_logs(&self.redis_url, user_id, signature).await {
-            Ok(logs) => {
-                if logs.is_empty() {
-                    ConsoleUI::print_info("No logs found for this transaction.");
-                } else {
-                    for log in logs {
-                        let formatted_log = self.format_log_entry(&log);
-                        println!("  {}", formatted_log.white());
-                    }
-                }
-            }
-            Err(e) => ConsoleUI::print_error(&format!("Failed to fetch logs: {}", e)),
-        }
-        println!();
-        println!(
-            "  {} {}",
-            "»".bright_cyan(),
-            "[c] clear logs • [0] back".truecolor(150, 150, 150)
-        );
-        ConsoleUI::print_refresh_hint();
-        ConsoleUI::print_prompt();
-    }
-
     async fn display_user_task_log_list(&self, user_id: i64) {
         ConsoleUI::print_header(&format!("Tasks for User ID: {}", user_id));
         match get_user_tasks(&self.redis_url, user_id).await {
@@ -1044,54 +725,6 @@ impl MenuManager {
         ConsoleUI::print_exit_option('0', "Back to Log Types");
         ConsoleUI::print_refresh_hint();
         ConsoleUI::print_prompt();
-    }
-
-    async fn handle_tx_raw_logs_input(&mut self, input: &str) {
-        if let MenuState::TxRawLogs {
-            user_id,
-            ref signature,
-        } = self.state
-        {
-            match input.to_lowercase().as_str() {
-                "0" => {
-                    self.state = MenuState::TxPerformanceSummary {
-                        user_id,
-                        signature: signature.clone(),
-                    }
-                }
-                "c" => {
-                    ConsoleUI::clear_screen();
-                    println!(
-                        "\n  {} {}",
-                        "⚠".bright_yellow().bold(),
-                        "Are you sure you want to delete logs for this transaction? (y/n)"
-                            .bright_yellow()
-                    );
-                    ConsoleUI::print_prompt();
-                    let mut confirm = String::new();
-                    let mut reader = BufReader::new(io::stdin());
-                    if reader.read_line(&mut confirm).await.is_ok() {
-                        if confirm.trim().eq_ignore_ascii_case("y") {
-                            match clear_user_tx_log(&self.redis_url, user_id, signature).await {
-                                Ok(_) => {
-                                    ConsoleUI::print_success("TX logs cleared successfully.");
-                                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                                }
-                                Err(e) => {
-                                    ConsoleUI::print_error(&format!("Failed to clear logs: {}", e));
-                                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                                }
-                            }
-                            self.state = MenuState::TxLogList { user_id, page: 0 };
-                        } else {
-                            ConsoleUI::print_info("Clear logs operation cancelled.");
-                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 
     async fn handle_user_task_log_list_input(&mut self, input: &str) {

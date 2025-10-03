@@ -81,4 +81,12 @@ impl ConsoleUI {
             message.truecolor(180, 180, 180)
         );
     }
+
+    pub fn print_warning(message: &str) {
+        println!(
+            "  {} {}",
+            "[⚠]".bright_yellow().bold(),
+            message.truecolor(255, 204, 0)
+        );
+    }
 }

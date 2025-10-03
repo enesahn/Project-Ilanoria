@@ -1,5 +1,6 @@
 use crate::{
-    ACTIVE_BLOOM_SWAPS, BLOOM_WS_CONNECTION, BloomBuyAck, BloomSwapTracker, PENDING_BLOOM_RESPONSES,
+    ACTIVE_BLOOM_SWAPS, BLOOM_WS_CONNECTION, BloomBuyAck, BloomSwapTracker,
+    BloomWsConnectionStatus, PENDING_BLOOM_RESPONSES,
 };
 use anyhow::Result;
 use base64::Engine;
@@ -21,8 +22,8 @@ const BLOOM_EXTENSION_ORIGIN: &str = "chrome-extension://akdiolpnpplhaoedmednpob
 const BLOOM_WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0";
 
 enum ConnectOutcome {
-    Connected,
-    Skipped,
+    SessionClosed { reason: String },
+    Skipped { reason: String },
 }
 
 struct BloomAuthData {
@@ -48,25 +49,88 @@ struct BloomWsMessage {
 
 pub async fn run_bloom_ws_listener() {
     let mut backoff_ms = 1000u64;
+
+    update_ws_status(
+        BloomWsConnectionStatus::Connecting,
+        "Bloom WebSocket connection is starting.",
+    );
+
     tokio::spawn(async {
         cleanup_stale_swaps().await;
     });
+
     loop {
         match connect_once().await {
-            Ok(ConnectOutcome::Connected) => {
+            Ok(ConnectOutcome::SessionClosed { reason }) => {
                 backoff_ms = 1000;
+                let delay_secs = ((backoff_ms + 999) / 1000).max(1);
+                let unit = if delay_secs == 1 { "second" } else { "seconds" };
+                let message = format!(
+                    "Bloom WS: {}. Retrying in {} {}.",
+                    normalize_reason(&reason),
+                    delay_secs,
+                    unit
+                );
+                update_ws_status(BloomWsConnectionStatus::Disconnected, message);
             }
-            Ok(ConnectOutcome::Skipped) => {
+            Ok(ConnectOutcome::Skipped { reason }) => {
                 backoff_ms = 30000;
+                let delay_secs = ((backoff_ms + 999) / 1000).max(1);
+                let unit = if delay_secs == 1 { "second" } else { "seconds" };
+                let message = format!(
+                    "Bloom WS: {}. Next attempt in {} {}.",
+                    normalize_reason(&reason),
+                    delay_secs,
+                    unit
+                );
+                update_ws_status(BloomWsConnectionStatus::Unavailable, message);
             }
             Err(err) => {
-                log::error!("bloom_ws: connection attempt failed err=\"{}\"", err);
-                mark_ws_offline();
                 backoff_ms = (backoff_ms * 2).min(30000);
+                let delay_secs = ((backoff_ms + 999) / 1000).max(1);
+                let unit = if delay_secs == 1 { "second" } else { "seconds" };
+                let message = format!(
+                    "Bloom WS: {}. Retrying in {} {}.",
+                    normalize_reason(&err.to_string()),
+                    delay_secs,
+                    unit
+                );
+                update_ws_status(BloomWsConnectionStatus::Disconnected, message);
             }
         }
         sleep(Duration::from_millis(backoff_ms)).await;
     }
+}
+
+fn update_ws_status(status: BloomWsConnectionStatus, message: impl Into<String>) {
+    let mut state = BLOOM_WS_CONNECTION.lock();
+    state.status = status;
+    state.message = message.into();
+}
+
+fn normalize_reason(reason: &str) -> String {
+    let mut text = reason.trim();
+
+    loop {
+        let trimmed = text.trim_end_matches('.');
+        if trimmed.len() == text.len() {
+            break;
+        }
+        text = trimmed.trim();
+    }
+
+    for prefix in [
+        "Bloom WebSocket connection ",
+        "Bloom WebSocket ",
+        "Bloom WS: ",
+        "WebSocket protocol error: ",
+    ] {
+        if let Some(stripped) = text.strip_prefix(prefix) {
+            return normalize_reason(stripped);
+        }
+    }
+
+    text.to_string()
 }
 
 async fn connect_once() -> Result<ConnectOutcome> {
@@ -75,22 +139,35 @@ async fn connect_once() -> Result<ConnectOutcome> {
         Some(value) if !value.is_empty() => value,
         _ => {
             log::info!("bloom_ws: connection skipped: invalid or expired auth token");
-            mark_ws_offline();
-            return Ok(ConnectOutcome::Skipped);
+            update_ws_status(
+                BloomWsConnectionStatus::Unavailable,
+                "Bloom WS: Authentication token missing or expired.",
+            );
+            return Ok(ConnectOutcome::Skipped {
+                reason: "Authentication token missing or expired".to_string(),
+            });
         }
     };
     if let Some(expires_at) = expires_at {
         let now_ms = current_time_millis()?;
         if now_ms > expires_at {
             log::info!("bloom_ws: connection skipped: invalid or expired auth token");
-            mark_ws_offline();
-            return Ok(ConnectOutcome::Skipped);
+            update_ws_status(
+                BloomWsConnectionStatus::Unavailable,
+                "Bloom WS: Authentication token missing or expired.",
+            );
+            return Ok(ConnectOutcome::Skipped {
+                reason: "Authentication token missing or expired".to_string(),
+            });
         }
     }
     let url = match Url::parse(&format!("wss://{}?{}", BLOOM_WS_HOST, token)) {
         Ok(parsed) => parsed,
         Err(err) => {
-            mark_ws_offline();
+            update_ws_status(
+                BloomWsConnectionStatus::Disconnected,
+                format!("Bloom WS: URL parsing failed ({})", err),
+            );
             return Err(err.into());
         }
     };
@@ -119,17 +196,23 @@ async fn connect_once() -> Result<ConnectOutcome> {
     let (mut ws_stream, _) = match connect_async(request).await {
         Ok(parts) => parts,
         Err(err) => {
-            mark_ws_offline();
+            update_ws_status(
+                BloomWsConnectionStatus::Disconnected,
+                format!("Bloom WS: Handshake failed ({})", err),
+            );
             return Err(err.into());
         }
     };
     log::info!("bloom_ws: connected");
-    mark_ws_online();
+    update_ws_status(
+        BloomWsConnectionStatus::Connected,
+        "Bloom WebSocket connection established.",
+    );
 
     let mut keepalive = tokio::time::interval(Duration::from_secs(20));
     keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    loop {
+    let close_reason = loop {
         tokio::select! {
             msg = ws_stream.next() => {
                 match msg {
@@ -150,49 +233,71 @@ async fn connect_once() -> Result<ConnectOutcome> {
                     Some(Ok(Message::Frame(_))) => {}
                     Some(Ok(Message::Ping(payload))) => {
                         if let Err(err) = ws_stream.send(Message::Pong(payload)).await {
-                            mark_ws_offline();
+                            update_ws_status(
+                                BloomWsConnectionStatus::Disconnected,
+                                format!("Bloom WebSocket ping response failed: {}", err),
+                            );
                             return Err(err.into());
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(frame))) => {
-                        log_close_frame(frame);
-                        mark_ws_offline();
-                        break;
+                        break describe_close_frame(frame);
                     }
                     Some(Err(err)) => {
-                        mark_ws_offline();
+                        update_ws_status(
+                            BloomWsConnectionStatus::Disconnected,
+                            format!("Bloom WebSocket stream error: {}", err),
+                        );
                         return Err(err.into());
                     }
                     None => {
                         log::warn!("bloom_ws: stream ended");
-                        mark_ws_offline();
-                        break;
+                        break String::from("Bloom WebSocket stream ended");
                     }
                 }
             }
             _ = keepalive.tick() => {
                 if let Err(err) = ws_stream.send(Message::Text("keepalive".to_string())).await {
-                    mark_ws_offline();
+                    update_ws_status(
+                        BloomWsConnectionStatus::Disconnected,
+                        format!("Bloom WebSocket keepalive failed: {}", err),
+                    );
                     return Err(err.into());
                 }
             }
         }
+    };
+
+    let resolved_reason = if close_reason.trim().is_empty() {
+        String::from("Bloom WebSocket session ended unexpectedly")
+    } else {
+        close_reason
+    };
+    update_ws_status(
+        BloomWsConnectionStatus::Disconnected,
+        resolved_reason.clone(),
+    );
+    Ok(ConnectOutcome::SessionClosed {
+        reason: resolved_reason,
+    })
+}
+
+fn describe_close_frame(frame: Option<CloseFrame<'_>>) -> String {
+    if let Some(close_frame) = frame {
+        log::warn!(
+            "bloom_ws: connection closed code={} reason={}",
+            close_frame.code,
+            close_frame.reason
+        );
+        format!(
+            "Connection closed (code {} - {})",
+            close_frame.code, close_frame.reason
+        )
+    } else {
+        log::warn!("bloom_ws: connection closed without frame");
+        String::from("Connection closed without close frame")
     }
-
-    mark_ws_offline();
-    Ok(ConnectOutcome::Connected)
-}
-
-fn mark_ws_online() {
-    let mut state = BLOOM_WS_CONNECTION.lock();
-    state.is_connected = true;
-    state.last_success_at = Some(SystemTime::now());
-}
-
-fn mark_ws_offline() {
-    let mut state = BLOOM_WS_CONNECTION.lock();
-    state.is_connected = false;
 }
 
 fn handle_message_text(text: &str) {
@@ -344,18 +449,6 @@ fn handle_failure(id: &str, tracker: &BloomSwapTracker, status: u8, error: Optio
             status,
             error
         );
-    }
-}
-
-fn log_close_frame(frame: Option<CloseFrame<'_>>) {
-    if let Some(close_frame) = frame {
-        log::warn!(
-            "bloom_ws: connection closed code={} reason={}",
-            close_frame.code,
-            close_frame.reason
-        );
-    } else {
-        log::warn!("bloom_ws: connection closed without frame");
     }
 }
 

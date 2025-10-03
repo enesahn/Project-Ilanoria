@@ -3,9 +3,10 @@ use teloxide::{prelude::*, types::ChatId, utils::command::BotCommands};
 
 use crate::application::pricing::SolPriceState;
 use crate::infrastructure::blockchain::RpcClients;
+use crate::interfaces::bot::handlers::tasks::get_tasks;
 use crate::interfaces::bot::{
-    State, UserConfig, UserData, create_new_wallet, generate_main_menu_text, get_user_data,
-    main_menu_keyboard, save_user_data,
+    State, UserConfig, UserData, create_new_wallet, generate_tasks_text, get_user_data,
+    save_user_data, tasks_menu_keyboard,
 };
 
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -14,7 +15,7 @@ type MyDialogue = Dialogue<State, teloxide::dispatching::dialogue::InMemStorage<
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Supported commands:")]
 pub enum Command {
-    #[command(description = "Start the bot and see the main menu.")]
+    #[command(description = "Start the bot and review your tasks.")]
     Start,
 }
 
@@ -23,14 +24,14 @@ pub async fn start(
     dialogue: MyDialogue,
     msg: Message,
     redis_client: RedisClient,
-    sol_price_state: SolPriceState,
-    rpc_clients: RpcClients,
+    _sol_price_state: SolPriceState,
+    _rpc_clients: RpcClients,
 ) -> HandlerResult {
     let chat_id = msg.chat.id.0;
     let mut con = redis_client.get_multiplexed_async_connection().await?;
-    let user_data = get_user_data(&mut con, chat_id).await?;
+    let has_user_data = get_user_data(&mut con, chat_id).await?.is_some();
 
-    if user_data.is_none() {
+    if !has_user_data {
         bot.send_message(
             ChatId(chat_id),
             "Welcome! Creating a new wallet and default settings for you...",
@@ -50,14 +51,14 @@ pub async fn start(
         save_user_data(&mut con, chat_id, &new_user_data).await?;
     }
 
-    let menu_text =
-        generate_main_menu_text(redis_client.clone(), chat_id, sol_price_state, rpc_clients).await;
-    bot.send_message(ChatId(chat_id), menu_text)
+    let tasks_text = generate_tasks_text(redis_client.clone(), chat_id).await;
+    let tasks = get_tasks(redis_client.clone(), chat_id).await;
+    bot.send_message(ChatId(chat_id), tasks_text)
         .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-        .reply_markup(main_menu_keyboard())
+        .reply_markup(tasks_menu_keyboard(&tasks))
         .await?;
 
-    dialogue.update(State::Start).await?;
+    dialogue.update(State::TasksMenu).await?;
 
     Ok(())
 }

@@ -3,7 +3,6 @@ use parking_lot::Mutex;
 use redis::Client as RedisClient;
 use regex::Regex;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signer::{Signer, keypair::Keypair};
 use std::sync::Arc;
 use teloxide::prelude::*;
 
@@ -13,9 +12,8 @@ use crate::interfaces::bot::user::client::{
     UserClientHandle, get_token_info_from_bloom, search_dialogs,
 };
 use crate::interfaces::bot::{
-    State, Wallet, channel_selection_keyboard, escape_markdown, generate_settings_text,
-    generate_task_detail_text, generate_wallets_text, get_user_data, save_user_data,
-    settings_menu_keyboard, task_detail_keyboard, token_info_keyboard, wallets_menu_keyboard,
+    State, channel_selection_keyboard, escape_markdown, generate_task_detail_text, get_user_data,
+    save_user_data, task_detail_keyboard, token_info_keyboard,
 };
 
 type MyDialogue = Dialogue<State, teloxide::dispatching::dialogue::InMemStorage<State>>;
@@ -213,9 +211,7 @@ pub async fn text_handler(
                     )
                     .await;
 
-                    let mut con = redis_client.get_multiplexed_async_connection().await?;
-                    let user_data = get_user_data(&mut con, chat_id.0).await?.unwrap();
-                    let keyboard = token_info_keyboard(&user_data.config, mint);
+                    let keyboard = token_info_keyboard(mint);
 
                     bot.send_message(chat_id, final_message)
                         .parse_mode(teloxide::types::ParseMode::MarkdownV2)
@@ -233,7 +229,7 @@ pub async fn text_handler(
 
     if let Some(state) = dialogue.get().await? {
         match state.clone() {
-            State::Start | State::SettingsMenu | State::WalletsMenu | State::TasksMenu => {
+            State::Start | State::TasksMenu => {
                 return Ok(());
             }
             _ => {}
@@ -568,97 +564,6 @@ pub async fn text_handler(
                         .await?;
                 }
                 dialogue.update(State::TasksMenu).await?;
-            }
-            State::ReceiveImportKey {
-                menu_message_id,
-                prompt_message_id,
-            } => {
-                let key_validation_result = bs58::decode(text)
-                    .into_vec()
-                    .map_err(anyhow::Error::new)
-                    .and_then(|bytes| {
-                        Keypair::try_from(bytes.as_slice()).map_err(anyhow::Error::new)
-                    });
-
-                match key_validation_result {
-                    Ok(_) => {
-                        bot.delete_message(chat_id, prompt_message_id).await.ok();
-                        let new_prompt = bot
-                            .send_message(
-                                chat_id,
-                                "Private key is valid. Please enter a name for this wallet.",
-                            )
-                            .await?;
-                        dialogue
-                            .update(State::ReceiveWalletName {
-                                menu_message_id,
-                                prompt_message_id: new_prompt.id,
-                                private_key: text.to_string(),
-                            })
-                            .await?;
-                    }
-                    Err(_) => {
-                        bot.delete_message(chat_id, prompt_message_id).await.ok();
-                        let error_msg = bot
-                            .send_message(chat_id, "Invalid private key. Please try again.")
-                            .await?;
-                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                        bot.delete_message(chat_id, error_msg.id).await.ok();
-                        dialogue.update(State::WalletsMenu).await?;
-                    }
-                }
-            }
-            State::ReceiveWalletName {
-                menu_message_id,
-                prompt_message_id,
-                private_key,
-            } => {
-                let keypair = Keypair::from_base58_string(&private_key);
-                let new_wallet = Wallet {
-                    name: text.to_string(),
-                    public_key: keypair.pubkey().to_string(),
-                    private_key,
-                };
-                user_data.wallets.push(new_wallet);
-                save_user_data(&mut con, chat_id.0, &user_data).await?;
-
-                bot.delete_message(chat_id, prompt_message_id).await.ok();
-                let wallets_text = generate_wallets_text(redis_client.clone(), chat_id.0).await;
-                bot.edit_message_text(chat_id, menu_message_id, wallets_text)
-                    .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-                    .reply_markup(wallets_menu_keyboard(
-                        &user_data.wallets,
-                        user_data.default_wallet_index,
-                    ))
-                    .await?;
-                dialogue.update(State::WalletsMenu).await?;
-            }
-            State::ReceiveSlippage {
-                menu_message_id,
-                prompt_message_id,
-            } => {
-                bot.delete_message(chat_id, prompt_message_id).await.ok();
-                let mut success = false;
-                if let Ok(slippage) = text.parse::<u32>() {
-                    user_data.config.slippage_percent = slippage;
-                    success = true;
-                }
-                if success {
-                    save_user_data(&mut con, chat_id.0, &user_data).await?;
-                    let new_settings_text =
-                        generate_settings_text(redis_client.clone(), chat_id.0).await;
-                    bot.edit_message_text(chat_id, menu_message_id, new_settings_text)
-                        .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-                        .reply_markup(settings_menu_keyboard())
-                        .await?;
-                } else {
-                    let error_msg = bot
-                        .send_message(chat_id, "Invalid value. Please try again.")
-                        .await?;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                    bot.delete_message(chat_id, error_msg.id).await.ok();
-                }
-                dialogue.update(State::SettingsMenu).await?;
             }
             _ => {}
         }

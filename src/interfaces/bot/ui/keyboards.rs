@@ -1,22 +1,8 @@
-use crate::interfaces::bot::data::{BloomWalletInfo, Platform, Task, UserConfig, Wallet};
+use crate::interfaces::bot::data::{BloomWalletInfo, Platform, Task};
 use crate::interfaces::bot::ui::State;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
 const ITEMS_PER_PAGE: usize = 5;
-
-pub fn main_menu_keyboard() -> InlineKeyboardMarkup {
-    let buttons = vec![
-        vec![
-            InlineKeyboardButton::callback("📋 Tasks", "view_tasks"),
-            InlineKeyboardButton::callback("💰 Wallets", "view_wallets"),
-        ],
-        vec![
-            InlineKeyboardButton::callback("⚙️ Settings", "view_cfg"),
-            InlineKeyboardButton::callback("↻ Refresh", "refresh_main"),
-        ],
-    ];
-    InlineKeyboardMarkup::new(buttons)
-}
 
 pub fn tasks_menu_keyboard(tasks: &Vec<Task>) -> InlineKeyboardMarkup {
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -37,11 +23,6 @@ pub fn tasks_menu_keyboard(tasks: &Vec<Task>) -> InlineKeyboardMarkup {
         "➕ Create New Task",
         "create_task",
     )]);
-    buttons.push(vec![InlineKeyboardButton::callback(
-        "← Back to Main Menu",
-        "main_menu",
-    )]);
-
     InlineKeyboardMarkup::new(buttons)
 }
 
@@ -285,32 +266,6 @@ pub async fn user_selection_keyboard(state: &State) -> Option<InlineKeyboardMark
     }
 }
 
-pub fn wallets_menu_keyboard(wallets: &[Wallet], default_index: usize) -> InlineKeyboardMarkup {
-    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
-
-    for (i, wallet) in wallets.iter().enumerate() {
-        let name = &wallet.name;
-        let icon = if i == default_index { "✅" } else { "☑️" };
-        let text = format!("{} {}", icon, name);
-        buttons.push(vec![
-            InlineKeyboardButton::callback(text, format!("set_default_{}", i)),
-            InlineKeyboardButton::callback("🗑️", format!("remove_wallet_{}", i)),
-        ]);
-    }
-
-    buttons.push(vec![
-        InlineKeyboardButton::callback("➕ Create Wallet", "create_wallet"),
-        InlineKeyboardButton::callback("📥 Import Wallet", "import_wallet"),
-    ]);
-
-    buttons.push(vec![InlineKeyboardButton::callback(
-        "← Back to Main Menu",
-        "main_menu",
-    )]);
-
-    InlineKeyboardMarkup::new(buttons)
-}
-
 pub fn task_settings_keyboard(task: &Task) -> InlineKeyboardMarkup {
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
     buttons.push(vec![InlineKeyboardButton::callback(
@@ -425,24 +380,7 @@ fn shorten_wallet_address(address: &str) -> String {
     }
 }
 
-pub fn settings_menu_keyboard() -> InlineKeyboardMarkup {
-    let buttons = vec![
-        vec![InlineKeyboardButton::callback(
-            "📊 Edit Slippage",
-            "edit_slippage",
-        )],
-        vec![InlineKeyboardButton::callback(
-            "← Back to Main Menu",
-            "main_menu",
-        )],
-    ];
-    InlineKeyboardMarkup::new(buttons)
-}
-
-pub fn token_info_keyboard(_config: &UserConfig, _mint: &str) -> InlineKeyboardMarkup {
-    let buttons = vec![
-        vec![InlineKeyboardButton::callback("↻ Refresh", "r")],
-        vec![InlineKeyboardButton::callback("⚙️ Settings", "view_cfg")],
-    ];
+pub fn token_info_keyboard(_mint: &str) -> InlineKeyboardMarkup {
+    let buttons = vec![vec![InlineKeyboardButton::callback("↻ Refresh", "r")]];
     InlineKeyboardMarkup::new(buttons)
 }

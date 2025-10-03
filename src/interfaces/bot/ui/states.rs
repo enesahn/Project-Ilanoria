@@ -5,8 +5,6 @@ use teloxide::types::MessageId;
 pub enum State {
     #[default]
     Start,
-    SettingsMenu,
-    WalletsMenu,
     TasksMenu,
     TaskSettingsMenu {
         _task_name: String,
@@ -75,19 +73,6 @@ pub enum State {
     },
     TaskReceiveDiscordUsers {
         task_name: String,
-        menu_message_id: MessageId,
-        prompt_message_id: MessageId,
-    },
-    ReceiveImportKey {
-        menu_message_id: MessageId,
-        prompt_message_id: MessageId,
-    },
-    ReceiveWalletName {
-        menu_message_id: MessageId,
-        prompt_message_id: MessageId,
-        private_key: String,
-    },
-    ReceiveSlippage {
         menu_message_id: MessageId,
         prompt_message_id: MessageId,
     },

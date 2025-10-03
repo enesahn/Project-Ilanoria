@@ -1,5 +1,4 @@
 use crate::application::pricing::SolPriceState;
-use crate::infrastructure::blockchain::RpcClients;
 use crate::interfaces::bot::data::{Task, get_user_data};
 use redis::Client as RedisClient;
 
@@ -22,58 +21,6 @@ pub fn escape_markdown(text: &str) -> String {
         .replace("}", "\\}")
         .replace(".", "\\.")
         .replace("!", "\\!")
-}
-
-pub async fn generate_main_menu_text(
-    redis_client: RedisClient,
-    chat_id: i64,
-    sol_price_state: SolPriceState,
-    rpc_clients: RpcClients,
-) -> String {
-    let mut con = redis_client
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap();
-    match get_user_data(&mut con, chat_id).await {
-        Ok(Some(user_data)) => {
-            if let Some(default_wallet) = user_data.get_default_wallet() {
-                let pubkey_str = &default_wallet.public_key;
-                let rpc_client = &rpc_clients.helius_client;
-                let pubkey = solana_sdk::pubkey::Pubkey::try_from(pubkey_str.as_str()).unwrap();
-
-                let (balance_lamports, balance_str) = match rpc_client.get_balance(&pubkey).await {
-                    Ok(lamports) => {
-                        let sol_balance = lamports as f64 / 1_000_000_000.0;
-                        (lamports, format!("{:.4} SOL", sol_balance))
-                    }
-                    Err(_) => (0, "Error".to_string()),
-                };
-
-                let price_guard = sol_price_state.read().await;
-                let usd_value_str = match *price_guard {
-                    Some(price) => {
-                        let sol_balance = balance_lamports as f64 / 1_000_000_000.0;
-                        let usd_value = sol_balance * price as f64;
-                        let formatted_usd = format!("{:.2}", usd_value);
-                        let escaped_usd = escape_markdown(&formatted_usd);
-                        format!(" \\(${}\\)", escaped_usd)
-                    }
-                    None => "".to_string(),
-                };
-
-                format!(
-                    "🏠 *Main Menu*\n\n*Default Wallet: {}*\n`{}`\n\n*Balance:* `{}`{}",
-                    escape_markdown(&default_wallet.name),
-                    escape_markdown(pubkey_str),
-                    balance_str,
-                    usd_value_str
-                )
-            } else {
-                "⚠️ No default wallet found. Please create or import a wallet.".to_string()
-            }
-        }
-        _ => "⚠️ Could not load data. Please run /start again.".to_string(),
-    }
 }
 
 pub async fn generate_tasks_text(redis_client: RedisClient, chat_id: i64) -> String {
@@ -283,51 +230,6 @@ pub fn generate_task_wallets_text(task: &Task, current_display: &str) -> String 
         escape_markdown(&task.name),
         escape_markdown(current_display)
     )
-}
-
-pub async fn generate_wallets_text(redis_client: RedisClient, chat_id: i64) -> String {
-    let mut con = redis_client
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap();
-    match get_user_data(&mut con, chat_id).await {
-        Ok(Some(user_data)) => {
-            let mut text = "👛 *Your Wallets*\n\n".to_string();
-            for (i, wallet) in user_data.wallets.iter().enumerate() {
-                let icon = if i == user_data.default_wallet_index {
-                    "✅"
-                } else {
-                    "☑️"
-                };
-                text.push_str(&format!(
-                    "*{} {}*\n`{}`\n\n",
-                    icon,
-                    escape_markdown(&wallet.name),
-                    escape_markdown(&wallet.public_key)
-                ));
-            }
-            text
-        }
-        _ => "⚠️ Could not load wallets.".to_string(),
-    }
-}
-
-pub async fn generate_settings_text(redis_client: RedisClient, chat_id: i64) -> String {
-    let mut con = redis_client
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap();
-    match get_user_data(&mut con, chat_id).await {
-        Ok(Some(user_data)) => {
-            let config = user_data.config;
-            let slippage = escape_markdown(&config.slippage_percent.to_string());
-            format!(
-                "⚙️ *Current Settings:*\n\n*Slippage:* `{}%`",
-                slippage
-            )
-        }
-        _ => "⚠️ Could not load settings. Please run /start again.".to_string(),
-    }
 }
 
 fn format_task_bloom_wallet(task: &Task) -> String {
