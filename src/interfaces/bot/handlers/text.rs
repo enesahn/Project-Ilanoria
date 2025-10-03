@@ -133,7 +133,7 @@ pub async fn format_token_info_message(
     let user_data = get_user_data(&mut con, chat_id).await.unwrap().unwrap();
 
     let wallet_balance_str = if let Some(wallet) = user_data.get_default_wallet() {
-        let rpc_client = &rpc_clients.quicknode_client;
+        let rpc_client = &rpc_clients.helius_client;
         let pubkey = solana_sdk::pubkey::Pubkey::try_from(wallet.public_key.as_str()).unwrap();
         match rpc_client.get_balance(&pubkey).await {
             Ok(lamports) => {
@@ -251,6 +251,7 @@ pub async fn text_handler(
             State::TaskSelectChannelSearch {
                 task_name,
                 menu_message_id,
+                prompt_message_id,
             } => {
                 let handle = user_client_handle.lock().clone();
                 if let Some(client) = handle {
@@ -259,6 +260,7 @@ pub async fn text_handler(
                             let new_state = State::TaskSelectChannelFromList {
                                 task_name,
                                 menu_message_id,
+                                prompt_message_id,
                                 all_channels: channels,
                                 page: 0,
                             };
@@ -266,7 +268,7 @@ pub async fn text_handler(
                             let keyboard = channel_selection_keyboard(&new_state).await.unwrap();
                             bot.edit_message_text(
                                 chat_id,
-                                menu_message_id,
+                                prompt_message_id,
                                 "Found channels/groups. Please select one:",
                             )
                             .reply_markup(keyboard)
@@ -275,8 +277,8 @@ pub async fn text_handler(
                         _ => {
                             bot.edit_message_text(
                                 chat_id,
-                                menu_message_id,
-                                "No channels found with that title. Please try again:",
+                                prompt_message_id,
+                                "No channels found with that title. Please try again",
                             )
                             .await?;
                         }
@@ -284,7 +286,7 @@ pub async fn text_handler(
                 } else {
                     bot.edit_message_text(
                         chat_id,
-                        menu_message_id,
+                        prompt_message_id,
                         "User client is not logged in. Cannot search.",
                     )
                     .await?;
@@ -302,8 +304,13 @@ pub async fn text_handler(
                     save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                     let task = &user_data.tasks[task_index];
-                    let task_text =
-                        generate_task_detail_text(redis_client.clone(), chat_id.0, task).await;
+                    let task_text = generate_task_detail_text(
+                        redis_client.clone(),
+                        chat_id.0,
+                        task,
+                        sol_price_state.clone(),
+                    )
+                    .await;
                     bot.edit_message_text(chat_id, menu_message_id, task_text)
                         .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                         .reply_markup(task_detail_keyboard(task))
@@ -325,8 +332,13 @@ pub async fn text_handler(
                         save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                         let task = &user_data.tasks[task_index];
-                        let task_text =
-                            generate_task_detail_text(redis_client.clone(), chat_id.0, task).await;
+                        let task_text = generate_task_detail_text(
+                            redis_client.clone(),
+                            chat_id.0,
+                            task,
+                            sol_price_state.clone(),
+                        )
+                        .await;
                         bot.edit_message_text(chat_id, menu_message_id, task_text)
                             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                             .reply_markup(task_detail_keyboard(task))
@@ -349,8 +361,13 @@ pub async fn text_handler(
                         save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                         let task = &user_data.tasks[task_index];
-                        let task_text =
-                            generate_task_detail_text(redis_client.clone(), chat_id.0, task).await;
+                        let task_text = generate_task_detail_text(
+                            redis_client.clone(),
+                            chat_id.0,
+                            task,
+                            sol_price_state.clone(),
+                        )
+                        .await;
                         bot.edit_message_text(chat_id, menu_message_id, task_text)
                             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                             .reply_markup(task_detail_keyboard(task))
@@ -373,8 +390,13 @@ pub async fn text_handler(
                         save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                         let task = &user_data.tasks[task_index];
-                        let task_text =
-                            generate_task_detail_text(redis_client.clone(), chat_id.0, task).await;
+                        let task_text = generate_task_detail_text(
+                            redis_client.clone(),
+                            chat_id.0,
+                            task,
+                            sol_price_state.clone(),
+                        )
+                        .await;
                         bot.edit_message_text(chat_id, menu_message_id, task_text)
                             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                             .reply_markup(task_detail_keyboard(task))
@@ -395,8 +417,13 @@ pub async fn text_handler(
                     save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                     let task = &user_data.tasks[task_index];
-                    let task_text =
-                        generate_task_detail_text(redis_client.clone(), chat_id.0, task).await;
+                    let task_text = generate_task_detail_text(
+                        redis_client.clone(),
+                        chat_id.0,
+                        task,
+                        sol_price_state.clone(),
+                    )
+                    .await;
                     bot.edit_message_text(chat_id, menu_message_id, task_text)
                         .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                         .reply_markup(task_detail_keyboard(task))
@@ -466,6 +493,7 @@ pub async fn text_handler(
                                     redis_client.clone(),
                                     chat_id.0,
                                     task,
+                                    sol_price_state.clone(),
                                 )
                                 .await;
                                 bot.edit_message_text(chat_id, menu_message_id, task_text)
@@ -500,8 +528,13 @@ pub async fn text_handler(
                     save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                     let task = &user_data.tasks[task_index];
-                    let task_text =
-                        generate_task_detail_text(redis_client.clone(), chat_id.0, task).await;
+                    let task_text = generate_task_detail_text(
+                        redis_client.clone(),
+                        chat_id.0,
+                        task,
+                        sol_price_state.clone(),
+                    )
+                    .await;
                     bot.edit_message_text(chat_id, menu_message_id, task_text)
                         .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                         .reply_markup(task_detail_keyboard(task))
@@ -525,8 +558,13 @@ pub async fn text_handler(
                     save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                     let task = &user_data.tasks[task_index];
-                    let task_text =
-                        generate_task_detail_text(redis_client.clone(), chat_id.0, task).await;
+                    let task_text = generate_task_detail_text(
+                        redis_client.clone(),
+                        chat_id.0,
+                        task,
+                        sol_price_state.clone(),
+                    )
+                    .await;
                     bot.edit_message_text(chat_id, menu_message_id, task_text)
                         .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                         .reply_markup(task_detail_keyboard(task))
@@ -723,7 +761,7 @@ pub async fn text_handler(
                 bot.delete_message(chat_id, prompt_message_id).await.ok();
                 match text.parse::<u64>() {
                     Ok(percentage) if percentage > 0 && percentage <= 100 => {
-                        let rpc_client = &rpc_clients.quicknode_client;
+                        let rpc_client = &rpc_clients.helius_client;
                         let wallet_pubkey =
                             Pubkey::from_str(&user_data.get_default_wallet().unwrap().public_key)
                                 .unwrap();

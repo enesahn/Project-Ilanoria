@@ -3,5 +3,5 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct RpcClients {
-    pub quicknode_client: Arc<RpcClient>,
+    pub helius_client: Arc<RpcClient>,
 }

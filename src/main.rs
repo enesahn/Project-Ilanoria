@@ -13,7 +13,7 @@ mod infrastructure;
 mod interfaces;
 
 use application::health::worker::{WarmerState, WarmupResult, WarmupStatus, run_warmer};
-use application::indexer::{preload_from_redis, run_ws_ingest};
+use application::indexer::{preload_from_redis, run_raydium_pool_ingest, run_ws_ingest};
 use application::pricing::{SolPriceState, run_price_fetcher};
 use infrastructure::blockchain::{RpcClients, create_rpc_clients, run_bloom_ws_listener};
 use infrastructure::logging;
@@ -140,7 +140,6 @@ async fn main() {
         "http://eu1.bloom-ext.app".to_string(),
         infrastructure::blockchain::ZEROSLOT_RPC_URL.to_string(),
         infrastructure::blockchain::NODE1_RPC_URL.to_string(),
-        infrastructure::blockchain::QUICKNODE_RPC_URL.to_string(),
         infrastructure::blockchain::SHYFT_RPC_URL.to_string(),
         infrastructure::blockchain::HELIUS_RPC_URL.to_string(),
     ];
@@ -236,6 +235,7 @@ async fn main() {
     });
 
     tokio::spawn(run_ws_ingest());
+    tokio::spawn(run_raydium_pool_ingest());
 
     let warmer_task_state_clone = Arc::clone(&warmer_state);
     tokio::spawn(run_warmer_task(warmer_task_state_clone));

@@ -21,10 +21,12 @@ pub enum State {
     TaskSelectChannelSearch {
         task_name: String,
         menu_message_id: MessageId,
+        prompt_message_id: MessageId,
     },
     TaskSelectChannelFromList {
         task_name: String,
         menu_message_id: MessageId,
+        prompt_message_id: MessageId,
         all_channels: Vec<(String, i64)>,
         page: usize,
     },

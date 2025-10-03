@@ -1,13 +1,14 @@
 use crate::{
     ACTIVE_BLOOM_SWAPS, BLOOM_WS_CONNECTION, BloomBuyAck, BloomSwapTracker, PENDING_BLOOM_RESPONSES,
 };
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde::Deserialize;
-use std::time::{Instant, SystemTime};
+use std::convert::TryFrom;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -18,6 +19,16 @@ use url::Url;
 const BLOOM_WS_HOST: &str = "ws.bloom-ext.app";
 const BLOOM_EXTENSION_ORIGIN: &str = "chrome-extension://akdiolpnpplhaoedmednpobkhmkophmg";
 const BLOOM_WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0";
+
+enum ConnectOutcome {
+    Connected,
+    Skipped,
+}
+
+struct BloomAuthData {
+    token: Option<String>,
+    expires_at: Option<i64>,
+}
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
@@ -42,8 +53,11 @@ pub async fn run_bloom_ws_listener() {
     });
     loop {
         match connect_once().await {
-            Ok(_) => {
+            Ok(ConnectOutcome::Connected) => {
                 backoff_ms = 1000;
+            }
+            Ok(ConnectOutcome::Skipped) => {
+                backoff_ms = 30000;
             }
             Err(err) => {
                 log::error!("bloom_ws: connection attempt failed err=\"{}\"", err);
@@ -55,14 +69,24 @@ pub async fn run_bloom_ws_listener() {
     }
 }
 
-async fn connect_once() -> Result<()> {
-    let token = match std::env::var("BLOOM_AUTH_TOKEN") {
-        Ok(value) => value,
-        Err(_) => {
+async fn connect_once() -> Result<ConnectOutcome> {
+    let BloomAuthData { token, expires_at } = load_bloom_auth_data();
+    let token = match token.map(|value| value.trim().to_string()) {
+        Some(value) if !value.is_empty() => value,
+        _ => {
+            log::info!("bloom_ws: connection skipped: invalid or expired auth token");
             mark_ws_offline();
-            return Err(anyhow!("BLOOM_AUTH_TOKEN environment variable not set"));
+            return Ok(ConnectOutcome::Skipped);
         }
     };
+    if let Some(expires_at) = expires_at {
+        let now_ms = current_time_millis()?;
+        if now_ms > expires_at {
+            log::info!("bloom_ws: connection skipped: invalid or expired auth token");
+            mark_ws_offline();
+            return Ok(ConnectOutcome::Skipped);
+        }
+    }
     let url = match Url::parse(&format!("wss://{}?{}", BLOOM_WS_HOST, token)) {
         Ok(parsed) => parsed,
         Err(err) => {
@@ -70,7 +94,7 @@ async fn connect_once() -> Result<()> {
             return Err(err.into());
         }
     };
-    log::info!("bloom_ws: attempting connection");
+    log::info!("bloom_ws: Attempting WebSocket connection...");
     let mut key_bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut key_bytes);
     let websocket_key = BASE64_STANDARD.encode(key_bytes);
@@ -157,7 +181,7 @@ async fn connect_once() -> Result<()> {
     }
 
     mark_ws_offline();
-    Ok(())
+    Ok(ConnectOutcome::Connected)
 }
 
 fn mark_ws_online() {
@@ -242,6 +266,25 @@ fn process_ws_message(mut message: BloomWsMessage) {
             log::warn!("bloom_ws: unhandled status={} id={}", status, id);
         }
     }
+}
+
+fn current_time_millis() -> Result<i64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    Ok(i64::try_from(duration.as_millis())?)
+}
+
+fn load_bloom_auth_data() -> BloomAuthData {
+    let token = std::env::var("BLOOM_AUTH_TOKEN").ok();
+    let expires_at = std::env::var("BLOOM_AUTH_TOKEN_EXPIRES_AT")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            trimmed.parse::<i64>().ok()
+        });
+    BloomAuthData { token, expires_at }
 }
 
 fn handle_success(

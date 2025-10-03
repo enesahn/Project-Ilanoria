@@ -1,4 +1,4 @@
-use crate::interfaces::bot::data::{BloomWalletInfo, Task, UserConfig, Wallet};
+use crate::interfaces::bot::data::{BloomWalletInfo, Platform, Task, UserConfig, Wallet};
 use crate::interfaces::bot::ui::State;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
@@ -100,17 +100,23 @@ pub fn task_detail_keyboard(task: &Task) -> InlineKeyboardMarkup {
     ]);
 
     if task.platform == Platform::Telegram {
-        let channel_id_text = task
-            .listen_channels
-            .first()
-            .map_or("Not Set".to_string(), |id| id.to_string());
         buttons.push(vec![InlineKeyboardButton::callback(
             "👥 Telegram Users to Monitor",
             format!("task_users_{}", task.name),
         )]);
+        let has_channel = task
+            .listen_channel_name
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| !task.listen_channels.is_empty());
+        let channel_button_text = if has_channel {
+            "📢 Change Channel"
+        } else {
+            "📢 Set Channel"
+        };
         buttons.push(vec![
             InlineKeyboardButton::callback(
-                format!("📢 Set Channel ID: {}", channel_id_text),
+                channel_button_text,
                 format!("task_channels_{}", task.name),
             ),
             InlineKeyboardButton::callback(
@@ -120,17 +126,22 @@ pub fn task_detail_keyboard(task: &Task) -> InlineKeyboardMarkup {
         ]);
     } else {
         buttons.push(vec![InlineKeyboardButton::callback(
-            "🔑 Set Discord Token",
-            format!("task_discord_token_{}", task.name),
-        )]);
-        buttons.push(vec![InlineKeyboardButton::callback(
             "👥 Discord Users to Monitor",
             format!("task_discord_users_{}", task.name),
         )]);
-        let discord_channel_text = task.discord_channel_id.as_deref().unwrap_or("Not Set");
+        let has_discord_channel = task
+            .discord_channel_id
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        let discord_channel_button = if has_discord_channel {
+            "📢 Change Channel ID"
+        } else {
+            "📢 Set Channel ID"
+        };
         buttons.push(vec![
             InlineKeyboardButton::callback(
-                format!("📢 Set Channel ID: {}", discord_channel_text),
+                discord_channel_button,
                 format!("task_discord_channel_{}", task.name),
             ),
             InlineKeyboardButton::callback(
@@ -213,7 +224,7 @@ pub async fn channel_selection_keyboard(state: &State) -> Option<InlineKeyboardM
 
         buttons.push(vec![InlineKeyboardButton::callback(
             "← Cancel",
-            format!("task_detail_{}", task_name),
+            format!("task_chan_cancel_{}", task_name),
         )]);
         Some(InlineKeyboardMarkup::new(buttons))
     } else {
@@ -301,16 +312,31 @@ pub fn wallets_menu_keyboard(wallets: &[Wallet], default_index: usize) -> Inline
 }
 
 pub fn task_settings_keyboard(task: &Task) -> InlineKeyboardMarkup {
-    let buttons = vec![
-        vec![InlineKeyboardButton::callback(
-            "🌸 Bloom Wallets",
-            format!("task_settings_wallets_{}", task.name),
-        )],
-        vec![InlineKeyboardButton::callback(
-            "← Back to Task",
-            format!("task_detail_{}", task.name),
-        )],
-    ];
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    buttons.push(vec![InlineKeyboardButton::callback(
+        "🌸 Bloom Wallets",
+        format!("task_settings_wallets_{}", task.name),
+    )]);
+    if matches!(task.platform, Platform::Discord) {
+        let has_token = task
+            .discord_token
+            .as_ref()
+            .map(|token| !token.trim().is_empty())
+            .unwrap_or(false);
+        let label = if has_token {
+            "🔑 Update Discord Token"
+        } else {
+            "🔑 Set Discord Token"
+        };
+        buttons.push(vec![InlineKeyboardButton::callback(
+            label,
+            format!("task_discord_token_{}", task.name),
+        )]);
+    }
+    buttons.push(vec![InlineKeyboardButton::callback(
+        "← Back to Task",
+        format!("task_detail_{}", task.name),
+    )]);
     InlineKeyboardMarkup::new(buttons)
 }
 

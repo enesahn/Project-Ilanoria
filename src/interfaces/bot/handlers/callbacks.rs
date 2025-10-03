@@ -58,6 +58,7 @@ pub async fn callback_handler(
                 bot.clone(),
                 redis_client,
                 dialogue,
+                sol_price_state.clone(),
                 user_client_handle.clone(),
             )
             .await?;

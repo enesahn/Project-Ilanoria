@@ -1,3 +1,4 @@
+use crate::application::pricing::SolPriceState;
 use crate::interfaces::bot::data::types::Platform;
 use crate::interfaces::bot::user::client::{UserClientHandle, get_chat_admins};
 use crate::interfaces::bot::utils::fetch_bloom_wallets;
@@ -33,6 +34,7 @@ pub async fn handle_task_callbacks(
     bot: Bot,
     redis_client: RedisClient,
     dialogue: MyDialogue,
+    sol_price_state: SolPriceState,
     user_client_handle: Arc<Mutex<Option<UserClientHandle>>>,
 ) -> HandlerResult {
     if let Some(message) = q.message.clone() {
@@ -64,6 +66,7 @@ pub async fn handle_task_callbacks(
                     listen_channel_name: None,
                     listen_users: vec![],
                     listen_usernames: vec![],
+                    telegram_channel_is_broadcast: false,
                     discord_token: None,
                     discord_channel_id: None,
                     discord_username: None,
@@ -268,8 +271,13 @@ pub async fn handle_task_callbacks(
                 .await?;
         } else if let Some(task_name) = data.strip_prefix("task_detail_") {
             if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, task_name).await {
-                let task_text =
-                    generate_task_detail_text(redis_client.clone(), chat_id.0, &task).await;
+                let task_text = generate_task_detail_text(
+                    redis_client.clone(),
+                    chat_id.0,
+                    &task,
+                    sol_price_state.clone(),
+                )
+                .await;
                 bot.edit_message_text(chat_id, message.id, task_text)
                     .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                     .reply_markup(task_detail_keyboard(&task))
@@ -281,8 +289,13 @@ pub async fn handle_task_callbacks(
         } else if let Some(task_name) = data.strip_prefix("task_toggle_inform_") {
             toggle_task_inform_only(redis_client.clone(), chat_id.0, task_name).await?;
             if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, task_name).await {
-                let task_text =
-                    generate_task_detail_text(redis_client.clone(), chat_id.0, &task).await;
+                let task_text = generate_task_detail_text(
+                    redis_client.clone(),
+                    chat_id.0,
+                    &task,
+                    sol_price_state.clone(),
+                )
+                .await;
                 bot.edit_message_text(chat_id, message.id, task_text)
                     .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                     .reply_markup(task_detail_keyboard(&task))
@@ -296,8 +309,13 @@ pub async fn handle_task_callbacks(
                             .text(error_msg)
                             .show_alert(true)
                             .await?;
-                        let task_text =
-                            generate_task_detail_text(redis_client.clone(), chat_id.0, &task).await;
+                        let task_text = generate_task_detail_text(
+                            redis_client.clone(),
+                            chat_id.0,
+                            &task,
+                            sol_price_state.clone(),
+                        )
+                        .await;
                         bot.edit_message_text(chat_id, message.id, task_text)
                             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                             .reply_markup(task_detail_keyboard(&task))
@@ -310,9 +328,13 @@ pub async fn handle_task_callbacks(
                 if let Some(updated_task) =
                     get_task_by_name(redis_client.clone(), chat_id.0, task_name).await
                 {
-                    let task_text =
-                        generate_task_detail_text(redis_client.clone(), chat_id.0, &updated_task)
-                            .await;
+                    let task_text = generate_task_detail_text(
+                        redis_client.clone(),
+                        chat_id.0,
+                        &updated_task,
+                        sol_price_state.clone(),
+                    )
+                    .await;
                     bot.edit_message_text(chat_id, message.id, task_text)
                         .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                         .reply_markup(task_detail_keyboard(&updated_task))
@@ -447,6 +469,7 @@ pub async fn handle_task_callbacks(
                             redis_client.clone(),
                             chat_id.0,
                             updated_task,
+                            sol_price_state.clone(),
                         )
                         .await;
                         bot.edit_message_text(chat_id, message.id, task_text)
@@ -478,6 +501,7 @@ pub async fn handle_task_callbacks(
                             redis_client.clone(),
                             chat_id.0,
                             updated_task,
+                            sol_price_state.clone(),
                         )
                         .await;
                         bot.edit_message_text(chat_id, message.id, task_text)
@@ -524,16 +548,13 @@ pub async fn handle_task_callbacks(
         } else if data.starts_with("task_channels_") {
             let task_name = data.strip_prefix("task_channels_").unwrap().to_string();
             let prompt_message = bot
-                .edit_message_text(
-                    chat_id,
-                    message.id,
-                    "Please enter a channel or group title to search:",
-                )
+                .send_message(chat_id, "Please enter a channel or group title to search:")
                 .await?;
             dialogue
                 .update(State::TaskSelectChannelSearch {
                     task_name,
-                    menu_message_id: prompt_message.id,
+                    menu_message_id: message.id,
+                    prompt_message_id: prompt_message.id,
                 })
                 .await?;
         } else if data.starts_with("task_users_") {
@@ -575,13 +596,56 @@ pub async fn handle_task_callbacks(
                                 .await?;
                             }
                             Err(e) => {
-                                let _ = send_cleanup_msg(
-                                    &bot,
-                                    chat_id,
-                                    &format!("Error fetching admins: {}", e),
-                                    5,
-                                )
-                                .await;
+                                if is_chat_admin_required_error(&e) {
+                                    if let Err(mark_err) = mark_channel_without_users(
+                                        redis_client.clone(),
+                                        chat_id.0,
+                                        &task_name,
+                                    )
+                                    .await
+                                    {
+                                        log::warn!(
+                                            "Failed to mark channel without admins chat_id={} task={} err={}",
+                                            chat_id.0,
+                                            task_name,
+                                            mark_err
+                                        );
+                                    }
+                                    if let Some(updated_task) = get_task_by_name(
+                                        redis_client.clone(),
+                                        chat_id.0,
+                                        &task_name,
+                                    )
+                                    .await
+                                    {
+                                        let task_text = generate_task_detail_text(
+                                            redis_client.clone(),
+                                            chat_id.0,
+                                            &updated_task,
+                                            sol_price_state.clone(),
+                                        )
+                                        .await;
+                                        bot.edit_message_text(chat_id, message.id, task_text)
+                                            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                                            .reply_markup(task_detail_keyboard(&updated_task))
+                                            .await?;
+                                    }
+                                    let _ = send_cleanup_msg(
+                                        &bot,
+                                        chat_id,
+                                        "This a channel, no specific users to monitor",
+                                        5,
+                                    )
+                                    .await;
+                                } else {
+                                    let _ = send_cleanup_msg(
+                                        &bot,
+                                        chat_id,
+                                        &format!("Error fetching admins: {}", e),
+                                        5,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                     } else {
@@ -594,17 +658,31 @@ pub async fn handle_task_callbacks(
             let parts: Vec<&str> = data.split('_').collect();
             let task_name = parts[3].to_string();
             let selected_channel_id = parts[4].parse::<i64>()?;
-            let selected_channel_name =
-                if let Some(State::TaskSelectChannelFromList { all_channels, .. }) =
-                    dialogue.get().await?
+            let mut prompt_message_id_opt: Option<MessageId> = None;
+            let mut configuration_message_id_opt: Option<MessageId> = None;
+            let mut selected_channel_name = None;
+            if let Some(state) = dialogue.get().await?.clone() {
+                if let State::TaskSelectChannelFromList {
+                    task_name: state_task_name,
+                    menu_message_id,
+                    prompt_message_id,
+                    all_channels,
+                    ..
+                } = state
                 {
-                    all_channels
-                        .iter()
-                        .find(|(_, id)| *id == selected_channel_id)
-                        .map(|(name, _)| name.clone())
-                } else {
-                    None
-                };
+                    if state_task_name == task_name {
+                        selected_channel_name = all_channels
+                            .iter()
+                            .find(|(_, id)| *id == selected_channel_id)
+                            .map(|(name, _)| name.clone());
+                        prompt_message_id_opt = Some(prompt_message_id);
+                        configuration_message_id_opt = Some(menu_message_id);
+                    }
+                }
+            }
+            if configuration_message_id_opt.is_none() {
+                return Ok(());
+            }
             let mut con = redis_client.get_multiplexed_async_connection().await?;
             if let Some(mut user_data) = get_user_data(&mut con, chat_id.0).await? {
                 if let Some(existing) = user_data.tasks.iter().find(|t| {
@@ -628,6 +706,7 @@ pub async fn handle_task_callbacks(
                     task.listen_channel_name = selected_channel_name;
                     task.listen_users = vec![];
                     task.listen_usernames = vec![];
+                    task.telegram_channel_is_broadcast = false;
                 }
                 save_user_data(&mut con, chat_id.0, &user_data).await?;
                 if let Some(task) = user_data.tasks.iter().find(|t| t.name == task_name) {
@@ -635,13 +714,19 @@ pub async fn handle_task_callbacks(
                         redis_client.clone(),
                         chat_id.0,
                         task,
+                        sol_price_state.clone(),
                     )
                     .await;
-                    bot.edit_message_text(chat_id, message.id, task_text)
-                        .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-                        .reply_markup(task_detail_keyboard(task))
-                        .await?;
+                    if let Some(configuration_message_id) = configuration_message_id_opt {
+                        bot.edit_message_text(chat_id, configuration_message_id, task_text)
+                            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                            .reply_markup(task_detail_keyboard(task))
+                            .await?;
+                    }
                 }
+            }
+            if let Some(prompt_message_id) = prompt_message_id_opt {
+                bot.delete_message(chat_id, prompt_message_id).await.ok();
             }
             dialogue.update(State::TasksMenu).await?;
         } else if data.starts_with("task_user_toggle_") || data.starts_with("task_user_page_") {
@@ -677,6 +762,7 @@ pub async fn handle_task_callbacks(
                                 .collect();
                             selected_names.sort();
                             task.listen_usernames = selected_names;
+                            task.telegram_channel_is_broadcast = false;
                         }
                         save_user_data(&mut con, chat_id.0, &user_data).await?;
                     }
@@ -705,6 +791,7 @@ pub async fn handle_task_callbacks(
             if let Some(State::TaskSelectChannelFromList {
                 task_name,
                 menu_message_id,
+                prompt_message_id,
                 all_channels,
                 mut page,
             }) = dialogue.get().await?.clone()
@@ -714,14 +801,33 @@ pub async fn handle_task_callbacks(
                 let new_state = State::TaskSelectChannelFromList {
                     task_name,
                     menu_message_id,
+                    prompt_message_id,
                     all_channels,
                     page,
                 };
                 dialogue.update(new_state.clone()).await?;
                 let keyboard = channel_selection_keyboard(&new_state).await.unwrap();
-                bot.edit_message_reply_markup(chat_id, message.id)
+                bot.edit_message_reply_markup(chat_id, prompt_message_id)
                     .reply_markup(keyboard)
                     .await?;
+            }
+        } else if let Some(task_name) = data.strip_prefix("task_chan_cancel_") {
+            if let Some(state) = dialogue.get().await?.clone() {
+                if let State::TaskSelectChannelFromList {
+                    task_name: state_task_name,
+                    prompt_message_id: _,
+                    ..
+                } = state
+                {
+                    if state_task_name == task_name {
+                        bot.delete_message(chat_id, message.id).await.ok();
+                        dialogue.update(State::TasksMenu).await?;
+                        bot.answer_callback_query(q.id)
+                            .text("Channel selection cancelled.")
+                            .await?;
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -876,7 +982,10 @@ fn activation_requirement_error(task: &Task) -> Option<&'static str> {
             if task.listen_channels.is_empty() {
                 return Some("❌ Please set a Telegram channel ID before activating this task.");
             }
-            if task.listen_users.is_empty() && task.listen_usernames.is_empty() {
+            if task.listen_users.is_empty()
+                && task.listen_usernames.is_empty()
+                && !task.telegram_channel_is_broadcast
+            {
                 return Some(
                     "❌ Please choose at least one Telegram user to monitor before activating this task.",
                 );
@@ -910,6 +1019,26 @@ fn activation_requirement_error(task: &Task) -> Option<&'static str> {
     }
 
     None
+}
+
+fn is_chat_admin_required_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains("CHAT_ADMIN_REQUIRED"))
+}
+
+async fn mark_channel_without_users(
+    redis_client: RedisClient,
+    chat_id: i64,
+    task_name: &str,
+) -> redis::RedisResult<()> {
+    let mut con = redis_client.get_multiplexed_async_connection().await?;
+    if let Some(mut user_data) = get_user_data(&mut con, chat_id).await? {
+        if let Some(task) = user_data.tasks.iter_mut().find(|t| t.name == task_name) {
+            task.telegram_channel_is_broadcast = true;
+            save_user_data(&mut con, chat_id, &user_data).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn toggle_task_inform_only(

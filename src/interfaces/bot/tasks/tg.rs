@@ -1,14 +1,18 @@
 use crate::BloomBuyAck;
+use crate::UserClientHandle;
 use crate::infrastructure::blockchain::bloom_buy;
 use crate::interfaces::bot::core::update_bus;
 use crate::interfaces::bot::escape_markdown;
 use crate::interfaces::bot::tasks::{append_task_log, resolve_task_wallet, state};
 use crate::interfaces::bot::{Task, UserData, log_buffer_to_ca_detection};
 use crate::{PENDING_BLOOM_RESPONSES, USER_CLIENT_HANDLE};
+use anyhow::{Result as AnyhowResult, anyhow};
 use chrono::Local;
 use grammers_client::types::Chat;
+use grammers_client::{InvocationError, grammers_tl_types as tl};
+use regex::Regex;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
@@ -80,6 +84,184 @@ fn strip_markdown_for_fallback(s: &str) -> String {
         .replace("\\!", "!");
     t = t.replace("*", "");
     t
+}
+
+fn join_link_regex() -> &'static Regex {
+    static JOIN_LINK_REGEX: OnceLock<Regex> = OnceLock::new();
+    JOIN_LINK_REGEX.get_or_init(|| {
+        Regex::new(
+            r"https?://(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog|tg\.dev|telesco\.pe)/(?:joinchat/|\+)([A-Za-z0-9_-]+)",
+        )
+        .expect("valid Telegram invite regex")
+    })
+}
+
+fn extract_invite_hashes(text: &str) -> Vec<String> {
+    join_link_regex()
+        .captures_iter(text)
+        .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+enum JoinResult {
+    Joined(Option<Chat>),
+    AlreadyJoined,
+}
+
+fn chat_from_updates(updates: tl::enums::Updates) -> Option<Chat> {
+    match updates {
+        tl::enums::Updates::Combined(data) => data.chats.into_iter().next(),
+        tl::enums::Updates::Updates(data) => data.chats.into_iter().next(),
+        _ => None,
+    }
+    .map(Chat::from_raw)
+}
+
+async fn try_join_invite(client: &UserClientHandle, hash: &str) -> AnyhowResult<JoinResult> {
+    match client
+        .invoke(&tl::functions::messages::ImportChatInvite {
+            hash: hash.to_string(),
+        })
+        .await
+    {
+        Ok(updates) => Ok(JoinResult::Joined(chat_from_updates(updates))),
+        Err(InvocationError::Rpc(rpc)) => {
+            let name = rpc.name.as_str();
+            match name {
+                "USER_ALREADY_PARTICIPANT" | "ALREADY_PARTICIPANT" => Ok(JoinResult::AlreadyJoined),
+                "INVITE_HASH_EXPIRED" => Err(anyhow!("Telegram invite expired (hash={})", hash)),
+                "INVITE_HASH_INVALID" => Err(anyhow!("Telegram invite invalid (hash={})", hash)),
+                other => Err(anyhow!(
+                    "Telegram RPC error {} while joining (hash={})",
+                    other,
+                    hash
+                )),
+            }
+        }
+        Err(err) => Err(anyhow!(
+            "Failed to import chat invite hash {}: {}",
+            hash,
+            err
+        )),
+    }
+}
+
+async fn handle_auto_join_links(chat_id: i64, task_name: &str, message_text: &str) {
+    let hashes = extract_invite_hashes(message_text);
+    if hashes.is_empty() {
+        return;
+    }
+
+    let handle = USER_CLIENT_HANDLE.lock().clone();
+    let Some(client) = handle else {
+        log::warn!(
+            "task.tg: auto-join skipped no user client chat_id={} task={}",
+            chat_id,
+            task_name
+        );
+        return;
+    };
+
+    let mut seen = HashSet::new();
+    let mut joined_channels: Vec<(String, Option<i64>, String)> = Vec::new();
+    let mut already_joined: Vec<String> = Vec::new();
+    let mut failures: Vec<(String, String)> = Vec::new();
+
+    for hash in hashes {
+        if !seen.insert(hash.clone()) {
+            continue;
+        }
+
+        match try_join_invite(&client, &hash).await {
+            Ok(JoinResult::Joined(chat_opt)) => {
+                let (channel_name, channel_id) = if let Some(chat) = chat_opt.as_ref() {
+                    (
+                        chat.name().unwrap_or("Unknown Channel").to_string(),
+                        Some(chat.id()),
+                    )
+                } else {
+                    ("Unknown Channel".to_string(), None)
+                };
+                log_task_event(
+                    chat_id,
+                    task_name,
+                    format!(
+                        "Joined Telegram channel via invite hash={} name={}",
+                        hash, channel_name
+                    ),
+                );
+                joined_channels.push((channel_name, channel_id, hash));
+            }
+            Ok(JoinResult::AlreadyJoined) => {
+                log_task_event(
+                    chat_id,
+                    task_name,
+                    format!("Invite hash={} already joined", hash),
+                );
+                already_joined.push(hash);
+            }
+            Err(err) => {
+                let err_str = err.to_string();
+                log::warn!(
+                    "task.tg: auto-join failed hash={} chat_id={} err={}",
+                    hash,
+                    chat_id,
+                    err_str
+                );
+                log_task_event(
+                    chat_id,
+                    task_name,
+                    format!("Failed to join via invite hash={} err={}", hash, err_str),
+                );
+                failures.push((hash, err_str));
+            }
+        }
+    }
+
+    if joined_channels.is_empty() && already_joined.is_empty() && failures.is_empty() {
+        return;
+    }
+
+    let mut sections = Vec::new();
+    sections.push("🤖 *Auto-Join Update*".to_string());
+
+    if !joined_channels.is_empty() {
+        sections.push(String::new());
+        sections.push("✅ *Joined Channels:*".to_string());
+        for (name, id_opt, hash) in &joined_channels {
+            let name_md = escape_markdown(name);
+            let hash_md = escape_markdown(hash);
+            let entry = if let Some(id) = id_opt {
+                let id_md = escape_markdown(&id.to_string());
+                format!("• {} (`hash:{}` · `id:{}`)", name_md, hash_md, id_md)
+            } else {
+                format!("• {} (`hash:{}`)", name_md, hash_md)
+            };
+            sections.push(entry);
+        }
+    }
+
+    if !already_joined.is_empty() {
+        sections.push(String::new());
+        sections.push("ℹ️ *Already Joined:*".to_string());
+        for hash in &already_joined {
+            let hash_md = escape_markdown(hash);
+            sections.push(format!("• `hash:{}`", hash_md));
+        }
+    }
+
+    if !failures.is_empty() {
+        sections.push(String::new());
+        sections.push("⚠️ *Failed Invites:*".to_string());
+        for (hash, err) in &failures {
+            let hash_md = escape_markdown(hash);
+            let err_md = escape_markdown(err);
+            sections.push(format!("• `hash:{}` — {}", hash_md, err_md));
+        }
+    }
+
+    let message = sections.join("\n");
+    send_notification_markdown(chat_id, message).await;
 }
 
 fn format_sender_name(sender: Option<&Chat>) -> String {
@@ -201,10 +383,12 @@ async fn process_message(
         None => message_chat_id,
     };
 
+    let task_name = task.name.clone();
     let t_blacklist = Instant::now();
     let should_listen =
         task.listen_users.is_empty() || task.listen_users.contains(&effective_sender_id);
     let message_text = msg.text();
+    handle_auto_join_links(chat_id, &task_name, &message_text).await;
     let sender_name = format_sender_name(sender.as_ref());
     let channel_name = task
         .listen_channel_name
@@ -223,7 +407,6 @@ async fn process_message(
         blacklist_check_us,
         if detected_words.is_empty() { 0 } else { 1 }
     );
-    let task_name = task.name.clone();
     log_task_event(
         chat_id,
         &task_name,

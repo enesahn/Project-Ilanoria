@@ -162,7 +162,7 @@ pub async fn handle_trade_callback(
                 }
             } else if let Some(percent_part) = data.strip_prefix("s_") {
                 if let Ok(percentage) = percent_part.parse::<u64>() {
-                    let rpc_client = &rpc_clients.quicknode_client;
+                    let rpc_client = &rpc_clients.helius_client;
                     let wallet_pubkey =
                         Pubkey::from_str(&user_data.get_default_wallet().unwrap().public_key)
                             .unwrap();
