@@ -70,7 +70,8 @@ async fn connect_and_process(
             Message::Text(text) => {
                 if let Ok(event) = serde_json::from_str::<RaydiumEvent>(&text) {
                     if let Some(mint) = extract_candidate_mint(event.pool()) {
-                        if let Err(error) = index_mint_shards(redis_url, &mint).await {
+                        if let Err(error) = index_mint_shards(redis_url, &mint, "raydium.ws").await
+                        {
                             log::error!("Failed to index Raydium mint {}: {}", mint, error);
                         }
                     }

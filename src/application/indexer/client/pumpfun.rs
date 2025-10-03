@@ -44,7 +44,8 @@ async fn connect_and_process(redis_url: &str) -> Result<(), Box<dyn std::error::
                 if let Ok(event) = serde_json::from_str::<WsEvent>(&text) {
                     if event.tx_type.as_deref() == Some("create") {
                         if let Some(mint) = event.mint {
-                            if let Err(e) = index_mint_shards(redis_url, &mint).await {
+                            if let Err(e) = index_mint_shards(redis_url, &mint, "pumpfun.ws").await
+                            {
                                 log::error!("Failed to index mint {}: {}", mint, e);
                             }
                         }

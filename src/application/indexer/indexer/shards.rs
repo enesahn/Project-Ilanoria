@@ -1,10 +1,13 @@
 use crate::application::indexer::config::{HASH_KEY, MAX_PER_SHARD};
 use crate::infrastructure::database::{self as redis_infra, RedisResult};
+use chrono::Utc;
 use dashmap::DashMap;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+
+use super::log_bus::{IndexerMintLogEntry, record_indexer_mint_log};
 
 static SHARDS: OnceLock<DashMap<String, SmallVec<[Arc<str>; 8]>>> = OnceLock::new();
 
@@ -66,12 +69,12 @@ pub async fn preload_from_redis(redis_url: &str) -> RedisResult<usize> {
     }
 
     let us = t0.elapsed().as_micros();
-    log::info!("pp.preload fields={} perf.us={}", fields_loaded, us);
+    log::info!("indexer.preload fields={} perf.us={}", fields_loaded, us);
 
     Ok(fields_loaded)
 }
 
-pub async fn index_mint_shards(redis_url: &str, mint: &str) -> RedisResult<()> {
+pub async fn index_mint_shards(redis_url: &str, mint: &str, source: &str) -> RedisResult<()> {
     let t0 = Instant::now();
     let parts = split_mint_into_parts(mint);
 
@@ -81,6 +84,8 @@ pub async fn index_mint_shards(redis_url: &str, mint: &str) -> RedisResult<()> {
 
     let arc_mint: Arc<str> = Arc::from(mint.to_string());
     let map = shards_map();
+
+    let mut inserted = false;
 
     for part in &parts {
         let key = part.to_string();
@@ -95,11 +100,40 @@ pub async fn index_mint_shards(redis_url: &str, mint: &str) -> RedisResult<()> {
                 entry.remove(0);
             }
             entry.push(arc_mint.clone());
+            inserted = true;
         }
     }
 
     let us = t0.elapsed().as_micros();
-    log::info!("pp.index shards={} perf.us={}", parts.len(), us);
+    let window_strings: Vec<String> = parts.iter().map(|p| (*p).to_string()).collect();
+    if inserted {
+        log::info!(
+            "indexer.index source={} mint={} shards={} perf.us={} windows={:?}",
+            source,
+            mint,
+            parts.len(),
+            us,
+            parts
+        );
+    } else {
+        log::info!(
+            "indexer.index source={} mint={} shards={} perf.us={}",
+            source,
+            mint,
+            parts.len(),
+            us
+        );
+    }
+
+    record_indexer_mint_log(IndexerMintLogEntry {
+        timestamp: Utc::now(),
+        source: source.to_string(),
+        mint: mint.to_string(),
+        shards: parts.len(),
+        perf_us: us,
+        windows: window_strings,
+        was_inserted: inserted,
+    });
 
     redis_infra::ensure_initialized(redis_url).await?;
 
@@ -195,7 +229,7 @@ pub async fn threshold_detect_from_text(
 
         if let Some((mint, cnt)) = best {
             log::info!(
-                "pp.detect_redis hits={} uniq_windows={} best_cnt={} perf.us={}",
+                "indexer.detect_redis hits={} uniq_windows={} best_cnt={} perf.us={}",
                 redis_hits,
                 windows.len(),
                 cnt,
@@ -207,7 +241,7 @@ pub async fn threshold_detect_from_text(
             }
         } else {
             log::info!(
-                "pp.detect_redis hits=0 uniq_windows={} perf.us={}",
+                "indexer.detect_redis hits=0 uniq_windows={} perf.us={}",
                 windows.len(),
                 us
             );
@@ -222,7 +256,7 @@ pub async fn threshold_detect_from_text(
 
     if let Some((mint, cnt)) = best {
         log::info!(
-            "pp.detect_inmem hits={} uniq_windows={} best_cnt={} perf.us={}",
+            "indexer.detect_inmem hits={} uniq_windows={} best_cnt={} perf.us={}",
             total_hits,
             windows.len(),
             cnt,
@@ -234,7 +268,7 @@ pub async fn threshold_detect_from_text(
         }
     } else {
         log::info!(
-            "pp.detect_inmem hits=0 uniq_windows={} perf.us={}",
+            "indexer.detect_inmem hits=0 uniq_windows={} perf.us={}",
             windows.len(),
             us
         );

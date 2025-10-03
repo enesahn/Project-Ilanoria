@@ -1,6 +1,9 @@
 use crate::BLOOM_WS_CONNECTION;
 use crate::application::health::worker::{WarmerState, WarmupStatus};
-use crate::application::indexer::{ram_index_stats, redis_index_stats};
+use crate::application::indexer::{
+    IndexerMintLogEntry, indexer_mint_log_counters, ram_index_stats, recent_indexer_mint_logs,
+    redis_index_stats, subscribe_indexer_mint_logs,
+};
 use crate::infrastructure::logging::suppress_stdout_logs;
 use crate::interfaces::bot::data::storage::get_user_tasks;
 use crate::interfaces::bot::tasks::subscribe_task_logs;
@@ -10,7 +13,7 @@ use crate::interfaces::bot::{
     get_user_tx_signatures,
 };
 use crate::interfaces::console::console::ConsoleUI;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, SecondsFormat, Utc};
 use colored::*;
 use parking_lot::Mutex;
 use regex::Regex;
@@ -22,9 +25,11 @@ use tokio::sync::mpsc;
 
 enum MenuState {
     MainMenu,
+    ServerLogsRoot,
     SettingsRoot,
     TelegramUserMenu,
     WarmerStatus,
+    IndexerLogOverview,
     ServerLogsUserList,
     UserLogTypeSelection { user_id: i64 },
     GlobalLogsUserDetail { user_id: i64, page: usize },
@@ -33,6 +38,7 @@ enum MenuState {
     TxRawLogs { user_id: i64, signature: String },
     UserTaskLogList { user_id: i64 },
     TaskLiveLogs { user_id: i64, task_name: String },
+    IndexerLiveLogs,
     RedisIndex,
     Exiting,
 }
@@ -112,9 +118,11 @@ impl MenuManager {
     async fn display_current_menu(&mut self) {
         match &self.state {
             MenuState::MainMenu => self.display_main_menu(),
+            MenuState::ServerLogsRoot => self.display_server_logs_root(),
             MenuState::SettingsRoot => self.display_settings_root(),
             MenuState::TelegramUserMenu => self.display_telegram_user_menu().await,
             MenuState::WarmerStatus => self.display_warmer_status(),
+            MenuState::IndexerLogOverview => self.display_indexer_log_overview().await,
             MenuState::ServerLogsUserList => self.display_server_logs_user_list().await,
             MenuState::UserLogTypeSelection { user_id } => {
                 self.display_user_log_type_selection(*user_id)
@@ -140,6 +148,9 @@ impl MenuManager {
                 let task_name = task_name.clone();
                 self.run_task_live_logs(user_id, task_name).await;
             }
+            MenuState::IndexerLiveLogs => {
+                self.run_indexer_live_logs().await;
+            }
             MenuState::RedisIndex => self.display_redis_index().await,
             MenuState::Exiting => {}
         }
@@ -160,9 +171,11 @@ impl MenuManager {
 
         match self.state {
             MenuState::MainMenu => self.handle_main_menu_input(choice).await,
+            MenuState::ServerLogsRoot => self.handle_server_logs_root_input(choice).await,
             MenuState::SettingsRoot => self.handle_settings_root_input(choice).await,
             MenuState::TelegramUserMenu => self.handle_telegram_user_menu_input(choice).await,
             MenuState::WarmerStatus => self.handle_warmer_status_input(choice),
+            MenuState::IndexerLogOverview => self.handle_indexer_log_overview_input(choice).await,
             MenuState::ServerLogsUserList => self.handle_server_logs_user_list_input(choice).await,
             MenuState::UserLogTypeSelection { .. } => {
                 self.handle_user_log_type_selection_input(choice).await
@@ -177,6 +190,7 @@ impl MenuManager {
             MenuState::TxRawLogs { .. } => self.handle_tx_raw_logs_input(choice).await,
             MenuState::UserTaskLogList { .. } => self.handle_user_task_log_list_input(choice).await,
             MenuState::TaskLiveLogs { .. } => {}
+            MenuState::IndexerLiveLogs => {}
             MenuState::RedisIndex => self.handle_redis_index_input(choice).await,
             MenuState::Exiting => {}
         }
@@ -212,9 +226,28 @@ impl MenuManager {
         ConsoleUI::print_prompt();
     }
 
+    fn display_server_logs_root(&self) {
+        ConsoleUI::print_header("Server Logs");
+        ConsoleUI::print_option(1, "Indexer Mint Logs");
+        ConsoleUI::print_option(2, "User Logs");
+        println!();
+        ConsoleUI::print_exit_option('0', "Back to Main Menu");
+        ConsoleUI::print_refresh_hint();
+        ConsoleUI::print_prompt();
+    }
+
+    async fn handle_server_logs_root_input(&mut self, input: &str) {
+        match input {
+            "1" => self.state = MenuState::IndexerLogOverview,
+            "2" => self.state = MenuState::ServerLogsUserList,
+            "0" => self.state = MenuState::MainMenu,
+            _ => {}
+        }
+    }
+
     async fn handle_main_menu_input(&mut self, input: &str) {
         match input {
-            "1" => self.state = MenuState::ServerLogsUserList,
+            "1" => self.state = MenuState::ServerLogsRoot,
             "2" => self.state = MenuState::SettingsRoot,
             "3" => self.state = MenuState::WarmerStatus,
             "4" => self.state = MenuState::RedisIndex,
@@ -418,8 +451,131 @@ impl MenuManager {
         }
     }
 
+    async fn display_indexer_log_overview(&self) {
+        ConsoleUI::print_header("Indexer Mint Logs");
+
+        let counters = indexer_mint_log_counters();
+        let (ram_shards, ram_refs, ram_unique_mints, ram_bytes) = ram_index_stats();
+        let ram_mb = (ram_bytes as f64) / 1048576.0;
+
+        let (redis_fields, redis_unique_mints, redis_bytes) =
+            match redis_index_stats(&self.redis_url).await {
+                Ok(stats) => stats,
+                Err(error) => {
+                    ConsoleUI::print_error(&format!("Failed to load Redis stats: {}", error));
+                    (0, 0, 0)
+                }
+            };
+        let redis_mb = (redis_bytes as f64) / 1048576.0;
+
+        println!("  {}", "Activity Summary".bold().cyan());
+        println!(
+            "  {:<28}{}",
+            "Total indexed mints:",
+            format!("{}", counters.total).white()
+        );
+        println!(
+            "  {:<28}{}",
+            "pumpfun.ws events:",
+            format!("{}", counters.pumpfun).white()
+        );
+        println!(
+            "  {:<28}{}",
+            "raydium.ws events:",
+            format!("{}", counters.raydium).white()
+        );
+        println!(
+            "  {:<28}{}",
+            "other sources:",
+            format!("{}", counters.other).white()
+        );
+
+        println!();
+        println!("  {}", "In-Memory Index".bold().cyan());
+        println!(
+            "  {:<28}{}",
+            "Tracked shard keys:",
+            format!("{}", ram_shards).white()
+        );
+        println!(
+            "  {:<28}{}",
+            "Stored references:",
+            format!("{}", ram_refs).white()
+        );
+        println!(
+            "  {:<28}{}",
+            "Unique mints:",
+            format!("{}", ram_unique_mints).white()
+        );
+        println!("  {:<28}{:.2} MB", "Memory footprint:", ram_mb);
+
+        println!();
+        println!("  {}", "Redis Index".bold().cyan());
+        println!(
+            "  {:<28}{}",
+            "Stored shard fields:",
+            format!("{}", redis_fields).white()
+        );
+        println!(
+            "  {:<28}{}",
+            "Redis unique mints:",
+            format!("{}", redis_unique_mints).white()
+        );
+        println!("  {:<28}{:.2} MB", "Redis footprint:", redis_mb);
+
+        let recent = recent_indexer_mint_logs(5);
+        println!();
+        if recent.is_empty() {
+            ConsoleUI::print_info("No indexer activity recorded yet.");
+        } else {
+            println!("  {}", "Most recent indexed mints".bold().cyan());
+            for entry in recent {
+                println!("    {}", self.format_indexer_overview_entry(&entry).white());
+            }
+        }
+
+        println!();
+        ConsoleUI::print_option(1, "Live Indexer Logs");
+        println!();
+        ConsoleUI::print_exit_option('0', "Back to Server Logs");
+        ConsoleUI::print_refresh_hint();
+        ConsoleUI::print_prompt();
+    }
+
+    async fn handle_indexer_log_overview_input(&mut self, input: &str) {
+        match input {
+            "1" => self.state = MenuState::IndexerLiveLogs,
+            "0" => self.state = MenuState::ServerLogsRoot,
+            _ => {}
+        }
+    }
+
+    fn format_indexer_overview_entry(&self, entry: &IndexerMintLogEntry) -> String {
+        let timestamp = entry
+            .timestamp
+            .with_timezone(&Local)
+            .format("%H:%M:%S")
+            .to_string();
+        let windows_text = if entry.windows.is_empty() {
+            "[]".to_string()
+        } else {
+            let joined = entry
+                .windows
+                .iter()
+                .map(|window| format!("\"{}\"", window))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{}]", joined)
+        };
+        let status = if entry.was_inserted { "" } else { " (cached)" };
+        format!(
+            "[{}] {} mint={} shards={} perf={}µs{} windows={}",
+            timestamp, entry.source, entry.mint, entry.shards, entry.perf_us, status, windows_text
+        )
+    }
+
     async fn display_server_logs_user_list(&self) {
-        ConsoleUI::print_header("Server Logs - Select User");
+        ConsoleUI::print_header("Server Logs • User Logs");
 
         match get_all_user_ids(&self.redis_url).await {
             Ok(user_ids) => {
@@ -435,14 +591,14 @@ impl MenuManager {
         }
 
         println!();
-        ConsoleUI::print_exit_option('0', "Back to Main Menu");
+        ConsoleUI::print_exit_option('0', "Back to Server Logs");
         ConsoleUI::print_refresh_hint();
         ConsoleUI::print_prompt();
     }
 
     async fn handle_server_logs_user_list_input(&mut self, input: &str) {
         if input == "0" {
-            self.state = MenuState::MainMenu;
+            self.state = MenuState::ServerLogsRoot;
             return;
         }
         if let Ok(choice) = input.parse::<usize>() {
@@ -1060,6 +1216,148 @@ impl MenuManager {
                             clear_footer();
                             ConsoleUI::print_info("Log stream ended.");
                             self.state = MenuState::UserTaskLogList { user_id };
+                            self.skip_input_cycle = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_indexer_live_logs(&mut self) {
+        let _log_guard = suppress_stdout_logs();
+
+        ConsoleUI::clear_screen();
+        ConsoleUI::print_header("Live Indexer Mint Logs");
+
+        let (history, mut receiver) = subscribe_indexer_mint_logs();
+
+        fn windows_line(entry: &IndexerMintLogEntry) -> String {
+            if entry.windows.is_empty() {
+                "windows=[]".to_string()
+            } else {
+                let joined = entry
+                    .windows
+                    .iter()
+                    .map(|window| format!("\"{}\"", window))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("windows=[{}]", joined)
+            }
+        }
+
+        fn status_label(entry: &IndexerMintLogEntry) -> &'static str {
+            if entry.was_inserted {
+                "new"
+            } else {
+                "duplicate"
+            }
+        }
+
+        fn render_entry(entry: &IndexerMintLogEntry) {
+            let windows_text = windows_line(entry);
+            let timestamp = entry.timestamp.to_rfc3339_opts(SecondsFormat::Secs, true);
+            println!("  {}", windows_text.white());
+            println!(
+                "  {}",
+                format!(
+                    "{} indexer.index source={} mint={} shards={} perf={}µs status={}",
+                    timestamp,
+                    entry.source,
+                    entry.mint,
+                    entry.shards,
+                    entry.perf_us,
+                    status_label(entry)
+                )
+                .white()
+            );
+            println!();
+        }
+
+        fn draw_status_line() {
+            println!(
+                "  {} {}",
+                "»".bright_cyan(),
+                "Real-time stream active. Type [q] or [0] to return.".truecolor(150, 150, 150)
+            );
+        }
+
+        fn draw_prompt_line() {
+            print!("  {} ", "❯".bright_green().bold());
+            let _ = std::io::stdout().flush();
+        }
+
+        fn render_footer() {
+            draw_status_line();
+            draw_prompt_line();
+        }
+
+        fn clear_footer() {
+            print!("\x1B[1F\x1B[0J");
+            let _ = std::io::stdout().flush();
+        }
+
+        fn clear_prompt_line() {
+            print!("\x1B[1F\x1B[0J");
+            let _ = std::io::stdout().flush();
+        }
+
+        if history.is_empty() {
+            ConsoleUI::print_info("No index events yet. Waiting for new mints...\n");
+        } else {
+            for entry in history {
+                render_entry(&entry);
+            }
+        }
+
+        render_footer();
+
+        let mut reader = BufReader::new(io::stdin());
+        let mut input = String::new();
+
+        loop {
+            input.clear();
+            select! {
+                read_res = reader.read_line(&mut input) => {
+                    match read_res {
+                        Ok(0) => {
+                            clear_footer();
+                            self.state = MenuState::IndexerLogOverview;
+                            self.skip_input_cycle = true;
+                            break;
+                        }
+                        Ok(_) => {
+                            let trimmed = input.trim().to_lowercase();
+                            if trimmed == "q" || trimmed == "0" {
+                                clear_footer();
+                                self.state = MenuState::IndexerLogOverview;
+                                self.skip_input_cycle = true;
+                                break;
+                            }
+                            clear_prompt_line();
+                            draw_prompt_line();
+                        }
+                        Err(error) => {
+                            clear_footer();
+                            ConsoleUI::print_error(&format!("Input error: {}", error));
+                            self.state = MenuState::IndexerLogOverview;
+                            self.skip_input_cycle = true;
+                            break;
+                        }
+                    }
+                }
+                recv_res = receiver.recv() => {
+                    match recv_res {
+                        Ok(entry) => {
+                            clear_footer();
+                            render_entry(&entry);
+                            render_footer();
+                        }
+                        Err(_) => {
+                            clear_footer();
+                            ConsoleUI::print_error("Indexer log stream ended.");
+                            self.state = MenuState::IndexerLogOverview;
                             self.skip_input_cycle = true;
                             break;
                         }

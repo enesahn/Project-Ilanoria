@@ -527,8 +527,7 @@ pub async fn handle_task_callbacks(
                 .await?;
         } else if let Some(task_name) = data.strip_prefix("task_discord_channel_") {
             let task_name = task_name.to_string();
-            if let Some(task) =
-                get_task_by_name(redis_client.clone(), chat_id.0, &task_name).await
+            if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, &task_name).await
             {
                 if task.active {
                     bot.answer_callback_query(q.id.clone())
@@ -566,8 +565,7 @@ pub async fn handle_task_callbacks(
                 .await?;
         } else if data.starts_with("task_channels_") {
             let task_name = data.strip_prefix("task_channels_").unwrap().to_string();
-            if let Some(task) =
-                get_task_by_name(redis_client.clone(), chat_id.0, &task_name).await
+            if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, &task_name).await
             {
                 if task.active {
                     bot.answer_callback_query(q.id.clone())
