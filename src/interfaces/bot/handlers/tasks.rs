@@ -526,12 +526,31 @@ pub async fn handle_task_callbacks(
                 })
                 .await?;
         } else if let Some(task_name) = data.strip_prefix("task_discord_channel_") {
+            let task_name = task_name.to_string();
+            if let Some(task) =
+                get_task_by_name(redis_client.clone(), chat_id.0, &task_name).await
+            {
+                if task.active {
+                    bot.answer_callback_query(q.id.clone())
+                        .text("⚠️ Please stop this task before changing the channel ID.")
+                        .show_alert(true)
+                        .await?;
+                    let _ = send_cleanup_msg(
+                        &bot,
+                        chat_id,
+                        "⚠️ Task is active. Deactivate it before changing the channel.",
+                        5,
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
             let prompt = bot
                 .send_message(chat_id, "Please enter the Discord channel ID:")
                 .await?;
             dialogue
                 .update(State::TaskReceiveDiscordChannelId {
-                    task_name: task_name.to_string(),
+                    task_name,
                     menu_message_id: message.id,
                     prompt_message_id: prompt.id,
                 })
@@ -547,6 +566,24 @@ pub async fn handle_task_callbacks(
                 .await?;
         } else if data.starts_with("task_channels_") {
             let task_name = data.strip_prefix("task_channels_").unwrap().to_string();
+            if let Some(task) =
+                get_task_by_name(redis_client.clone(), chat_id.0, &task_name).await
+            {
+                if task.active {
+                    bot.answer_callback_query(q.id.clone())
+                        .text("⚠️ Please stop this task before changing the channel.")
+                        .show_alert(true)
+                        .await?;
+                    let _ = send_cleanup_msg(
+                        &bot,
+                        chat_id,
+                        "⚠️ Task is active. Deactivate it before changing the channel.",
+                        5,
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
             let prompt_message = bot
                 .send_message(chat_id, "Please enter a channel or group title to search:")
                 .await?;
