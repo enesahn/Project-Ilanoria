@@ -224,6 +224,27 @@ pub async fn get_chat_admins(
     Ok(admins)
 }
 
+pub async fn is_channel_member(client: &UserClientHandle, channel_id: i64) -> Result<bool> {
+    let mut dialogs = client.iter_dialogs();
+    while let Some(dialog) = dialogs.next().await? {
+        let chat = dialog.chat();
+        if chat.id() == channel_id {
+            let me = client.get_me().await?;
+            match client.get_permissions(chat.clone(), &me).await {
+                Ok(_) => return Ok(true),
+                Err(err) if err.is("USER_NOT_PARTICIPANT") || err.is("CHANNEL_PRIVATE") => {
+                    return Ok(false);
+                }
+                Err(err) if err.is("PEER_ID_INVALID") => {
+                    return Ok(false);
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+    Ok(false)
+}
+
 pub async fn search_dialogs(client: &UserClientHandle, query: &str) -> Result<Vec<(String, i64)>> {
     let mut results = Vec::new();
     let mut dialogs = client.iter_dialogs();

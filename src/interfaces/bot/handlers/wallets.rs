@@ -4,7 +4,7 @@ use teloxide::types::MessageId;
 
 use crate::interfaces::bot::{
     State, create_new_wallet, generate_wallets_text, get_user_data, save_user_data,
-    wallets_menu_keyboard,
+    send_cleanup_msg, wallets_menu_keyboard,
 };
 
 type MyDialogue = Dialogue<State, teloxide::dispatching::dialogue::InMemStorage<State>>;
@@ -135,10 +135,8 @@ async fn handle_remove_wallet(
                     ))
                     .await?;
             } else {
-                bot.answer_callback_query(q.id.clone())
-                    .text("Cannot remove the last wallet.")
-                    .show_alert(true)
-                    .await?;
+                bot.answer_callback_query(q.id.clone()).await?;
+                let _ = send_cleanup_msg(&bot, chat_id, "Cannot remove the last wallet.", 5).await;
             }
         }
     }

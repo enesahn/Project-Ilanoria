@@ -321,12 +321,9 @@ pub async fn generate_settings_text(redis_client: RedisClient, chat_id: i64) -> 
         Ok(Some(user_data)) => {
             let config = user_data.config;
             let slippage = escape_markdown(&config.slippage_percent.to_string());
-            let buy_priority_fee = escape_markdown(&config.buy_priority_fee_sol.to_string());
-            let sell_priority_fee = escape_markdown(&config.sell_priority_fee_sol.to_string());
-
             format!(
-                "⚙️ *Current Settings:*\n\n*Slippage:* `{}%`\n*Buy Priority Fee:* `{}` SOL\n*Sell Priority Fee:* `{}` SOL",
-                slippage, buy_priority_fee, sell_priority_fee
+                "⚙️ *Current Settings:*\n\n*Slippage:* `{}%`",
+                slippage
             )
         }
         _ => "⚠️ Could not load settings. Please run /start again.".to_string(),

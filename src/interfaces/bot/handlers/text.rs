@@ -4,12 +4,9 @@ use redis::Client as RedisClient;
 use regex::Regex;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::{Signer, keypair::Keypair};
-use std::str::FromStr;
 use std::sync::Arc;
 use teloxide::prelude::*;
 
-use super::start::Command;
-use super::trade::{get_token_balance, run_trade_in_blocking_task};
 use crate::application::pricing::SolPriceState;
 use crate::infrastructure::blockchain::RpcClients;
 use crate::interfaces::bot::user::client::{
@@ -134,7 +131,7 @@ pub async fn format_token_info_message(
 
     let wallet_balance_str = if let Some(wallet) = user_data.get_default_wallet() {
         let rpc_client = &rpc_clients.helius_client;
-        let pubkey = solana_sdk::pubkey::Pubkey::try_from(wallet.public_key.as_str()).unwrap();
+        let pubkey = Pubkey::try_from(wallet.public_key.as_str()).unwrap();
         match rpc_client.get_balance(&pubkey).await {
             Ok(lamports) => {
                 let sol_balance = lamports as f64 / 1_000_000_000.0;
@@ -662,163 +659,6 @@ pub async fn text_handler(
                     bot.delete_message(chat_id, error_msg.id).await.ok();
                 }
                 dialogue.update(State::SettingsMenu).await?;
-            }
-            State::ReceiveBuyPriorityFee {
-                menu_message_id,
-                prompt_message_id,
-            } => {
-                bot.delete_message(chat_id, prompt_message_id).await.ok();
-                let mut success = false;
-                if let Ok(fee) = text.parse::<f64>() {
-                    if fee >= 0.0 {
-                        user_data.config.buy_priority_fee_sol = fee;
-                        success = true;
-                    }
-                }
-                if success {
-                    save_user_data(&mut con, chat_id.0, &user_data).await?;
-                    let new_settings_text =
-                        generate_settings_text(redis_client.clone(), chat_id.0).await;
-                    bot.edit_message_text(chat_id, menu_message_id, new_settings_text)
-                        .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-                        .reply_markup(settings_menu_keyboard())
-                        .await?;
-                } else {
-                    let error_msg = bot
-                        .send_message(chat_id, "Invalid value. Please try again.")
-                        .await?;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                    bot.delete_message(chat_id, error_msg.id).await.ok();
-                }
-                dialogue.update(State::SettingsMenu).await?;
-            }
-            State::ReceiveSellPriorityFee {
-                menu_message_id,
-                prompt_message_id,
-            } => {
-                bot.delete_message(chat_id, prompt_message_id).await.ok();
-                let mut success = false;
-                if let Ok(fee) = text.parse::<f64>() {
-                    if fee >= 0.0 {
-                        user_data.config.sell_priority_fee_sol = fee;
-                        success = true;
-                    }
-                }
-                if success {
-                    save_user_data(&mut con, chat_id.0, &user_data).await?;
-                    let new_settings_text =
-                        generate_settings_text(redis_client.clone(), chat_id.0).await;
-                    bot.edit_message_text(chat_id, menu_message_id, new_settings_text)
-                        .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-                        .reply_markup(settings_menu_keyboard())
-                        .await?;
-                } else {
-                    let error_msg = bot
-                        .send_message(chat_id, "Invalid value. Please try again.")
-                        .await?;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                    bot.delete_message(chat_id, error_msg.id).await.ok();
-                }
-                dialogue.update(State::SettingsMenu).await?;
-            }
-            State::ReceiveCustomBuyAmount {
-                prompt_message_id,
-                mint,
-            } => {
-                bot.delete_message(chat_id, prompt_message_id).await.ok();
-                match text.parse::<f64>() {
-                    Ok(amount) if amount > 0.0 => {
-                        let log_msg =
-                            format!("🟡 Attempting to BUY {} SOL of {} via Bloom", amount, mint);
-                        bot.send_message(chat_id, &log_msg).await?;
-                        crate::info!(chat_id.0, "{}", log_msg);
-
-                        let cmd = Command::Buy(amount, mint);
-                        let result_message = run_trade_in_blocking_task(
-                            user_data,
-                            cmd,
-                            redis_client,
-                            chat_id.0,
-                            rpc_clients,
-                        )
-                        .await;
-                        bot.send_message(chat_id, result_message).await?;
-                    }
-                    _ => {
-                        bot.send_message(
-                            chat_id,
-                            "Invalid amount. Please enter a positive number.",
-                        )
-                        .await?;
-                    }
-                }
-                dialogue.update(State::Start).await?;
-            }
-            State::ReceiveCustomSellPercentage {
-                prompt_message_id,
-                mint,
-            } => {
-                bot.delete_message(chat_id, prompt_message_id).await.ok();
-                match text.parse::<u64>() {
-                    Ok(percentage) if percentage > 0 && percentage <= 100 => {
-                        let rpc_client = &rpc_clients.helius_client;
-                        let wallet_pubkey =
-                            Pubkey::from_str(&user_data.get_default_wallet().unwrap().public_key)
-                                .unwrap();
-                        let mint_pubkey = Pubkey::from_str(&mint).unwrap();
-
-                        let total_balance =
-                            match get_token_balance(rpc_client, &wallet_pubkey, &mint_pubkey).await
-                            {
-                                Ok(balance) => balance,
-                                Err(e) => {
-                                    bot.send_message(
-                                        chat_id,
-                                        format!("Failed to get token balance: {}", e),
-                                    )
-                                    .await?;
-                                    dialogue.update(State::Start).await?;
-                                    return Ok(());
-                                }
-                            };
-
-                        if total_balance == 0 {
-                            bot.send_message(chat_id, "You don't have any of this token to sell.")
-                                .await?;
-                            dialogue.update(State::Start).await?;
-                            return Ok(());
-                        }
-
-                        let amount_to_sell =
-                            (total_balance as f64 * (percentage as f64 / 100.0)) as u64;
-
-                        let log_msg = format!(
-                            "🟡 Attempting to SELL {}% ({} tokens) of {} via Bloom",
-                            percentage, amount_to_sell, mint
-                        );
-                        bot.send_message(chat_id, &log_msg).await?;
-                        crate::info!(chat_id.0, "{}", log_msg);
-
-                        let cmd = Command::Sell(amount_to_sell, mint);
-                        let result_message = run_trade_in_blocking_task(
-                            user_data,
-                            cmd,
-                            redis_client,
-                            chat_id.0,
-                            rpc_clients,
-                        )
-                        .await;
-                        bot.send_message(chat_id, result_message).await?;
-                    }
-                    _ => {
-                        bot.send_message(
-                            chat_id,
-                            "Invalid percentage. Please enter a number between 1 and 100.",
-                        )
-                        .await?;
-                    }
-                }
-                dialogue.update(State::Start).await?;
             }
             _ => {}
         }

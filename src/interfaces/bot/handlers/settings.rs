@@ -43,12 +43,6 @@ async fn handle_edit_action(
 ) -> HandlerResult {
     let prompt_text = match data {
         "edit_slippage" => "Please enter the new slippage percentage (e.g., 25).",
-        "edit_buy_priority_fee" => {
-            "Please enter the new priority fee for BUYS in SOL (e.g., 0.001)."
-        }
-        "edit_sell_priority_fee" => {
-            "Please enter the new priority fee for SELLS in SOL (e.g., 0.0015)."
-        }
         _ => return Ok(()),
     };
 
@@ -56,14 +50,6 @@ async fn handle_edit_action(
 
     let new_state = match data {
         "edit_slippage" => State::ReceiveSlippage {
-            menu_message_id: message_id,
-            prompt_message_id: prompt_message.id,
-        },
-        "edit_buy_priority_fee" => State::ReceiveBuyPriorityFee {
-            menu_message_id: message_id,
-            prompt_message_id: prompt_message.id,
-        },
-        "edit_sell_priority_fee" => State::ReceiveSellPriorityFee {
             menu_message_id: message_id,
             prompt_message_id: prompt_message.id,
         },

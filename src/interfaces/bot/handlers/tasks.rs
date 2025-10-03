@@ -1,6 +1,6 @@
 use crate::application::pricing::SolPriceState;
 use crate::interfaces::bot::data::types::Platform;
-use crate::interfaces::bot::user::client::{UserClientHandle, get_chat_admins};
+use crate::interfaces::bot::user::client::{UserClientHandle, get_chat_admins, is_channel_member};
 use crate::interfaces::bot::utils::fetch_bloom_wallets;
 use crate::interfaces::bot::{
     State, Task, channel_selection_keyboard, generate_task_detail_text,
@@ -254,10 +254,9 @@ pub async fn handle_task_callbacks(
                         .await?;
                 }
                 Err(err) => {
-                    bot.answer_callback_query(q.id)
-                        .text(&format!("Failed to fetch Bloom wallets: {}", err))
-                        .show_alert(true)
-                        .await?;
+                    bot.answer_callback_query(q.id).await?;
+                    let err_msg = format!("Failed to fetch Bloom wallets: {}", err);
+                    let _ = send_cleanup_msg(&bot, chat_id, &err_msg, 5).await;
                 }
             }
         } else if let Some(task_name) = data.strip_prefix("task_settings_") {
@@ -305,10 +304,8 @@ pub async fn handle_task_callbacks(
             if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, task_name).await {
                 if !task.active {
                     if let Some(error_msg) = activation_requirement_error(&task) {
-                        bot.answer_callback_query(q.id.clone())
-                            .text(error_msg)
-                            .show_alert(true)
-                            .await?;
+                        bot.answer_callback_query(q.id.clone()).await?;
+                        let _ = send_cleanup_msg(&bot, chat_id, error_msg, 5).await;
                         let task_text = generate_task_detail_text(
                             redis_client.clone(),
                             chat_id.0,
@@ -321,6 +318,105 @@ pub async fn handle_task_callbacks(
                             .reply_markup(task_detail_keyboard(&task))
                             .await?;
                         return Ok(());
+                    }
+
+                    if matches!(task.platform, Platform::Telegram) {
+                        let Some(channel_id) = task.listen_channels.first().copied() else {
+                            bot.answer_callback_query(q.id.clone()).await?;
+                            let _ = send_cleanup_msg(
+                                &bot,
+                                chat_id,
+                                "⚠️ Channel information is missing. Please choose the channel again.",
+                                6,
+                            )
+                            .await;
+                            return Ok(());
+                        };
+
+                        let handle = user_client_handle.lock().clone();
+                        let Some(client) = handle else {
+                            bot.answer_callback_query(q.id.clone()).await?;
+                            let _ = send_cleanup_msg(
+                                &bot,
+                                chat_id,
+                                "⚠️ Telegram user client is disconnected. Please restart the session.",
+                                6,
+                            )
+                            .await;
+                            return Ok(());
+                        };
+
+                        match is_channel_member(&client, channel_id).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                bot.answer_callback_query(q.id.clone()).await?;
+                                log::warn!(
+                                    "Membership check failed chat_id={} task={} channel={}",
+                                    chat_id.0,
+                                    task_name,
+                                    channel_id
+                                );
+                                let cleared_task_result =
+                                    clear_telegram_task_channel_configuration(
+                                        redis_client.clone(),
+                                        chat_id.0,
+                                        task_name,
+                                    )
+                                    .await;
+                                let task_for_view = match cleared_task_result {
+                                    Ok(Some(updated_task)) => updated_task,
+                                    Ok(None) => {
+                                        log::warn!(
+                                            "No task found during channel reset chat_id={} task={}",
+                                            chat_id.0,
+                                            task_name
+                                        );
+                                        task.clone()
+                                    }
+                                    Err(err) => {
+                                        log::error!(
+                                            "Failed to clear Telegram channel configuration chat_id={} task={} err={}",
+                                            chat_id.0,
+                                            task_name,
+                                            err
+                                        );
+                                        let msg =
+                                            format!("⚠️ Failed to reset channel settings: {}", err);
+                                        let _ = send_cleanup_msg(&bot, chat_id, &msg, 8).await;
+                                        return Ok(());
+                                    }
+                                };
+
+                                let task_text = generate_task_detail_text(
+                                    redis_client.clone(),
+                                    chat_id.0,
+                                    &task_for_view,
+                                    sol_price_state.clone(),
+                                )
+                                .await;
+                                bot.edit_message_text(chat_id, message.id, task_text)
+                                    .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                                    .reply_markup(task_detail_keyboard(&task_for_view))
+                                    .await?;
+
+                                let warning_msg = "⚠️ The Telegram user client is no longer a member of this channel. Channel and monitoring settings were reset. Please select another channel or rejoin.";
+                                let _ = send_cleanup_msg(&bot, chat_id, warning_msg, 8).await;
+                                return Ok(());
+                            }
+                            Err(err) => {
+                                bot.answer_callback_query(q.id.clone()).await?;
+                                log::warn!(
+                                    "Failed to verify membership chat_id={} task={} err={}",
+                                    chat_id.0,
+                                    task_name,
+                                    err
+                                );
+                                let msg =
+                                    format!("⚠️ Unable to verify channel membership: {}", err);
+                                let _ = send_cleanup_msg(&bot, chat_id, &msg, 8).await;
+                                return Ok(());
+                            }
+                        }
                     }
                 }
 
@@ -530,14 +626,11 @@ pub async fn handle_task_callbacks(
             if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, &task_name).await
             {
                 if task.active {
-                    bot.answer_callback_query(q.id.clone())
-                        .text("⚠️ Please stop this task before changing the channel ID.")
-                        .show_alert(true)
-                        .await?;
+                    bot.answer_callback_query(q.id.clone()).await?;
                     let _ = send_cleanup_msg(
                         &bot,
                         chat_id,
-                        "⚠️ Task is active. Deactivate it before changing the channel.",
+                        "⚠️ Task is active. Please stop it before changing the channel ID.",
                         5,
                     )
                     .await;
@@ -568,14 +661,11 @@ pub async fn handle_task_callbacks(
             if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, &task_name).await
             {
                 if task.active {
-                    bot.answer_callback_query(q.id.clone())
-                        .text("⚠️ Please stop this task before changing the channel.")
-                        .show_alert(true)
-                        .await?;
+                    bot.answer_callback_query(q.id.clone()).await?;
                     let _ = send_cleanup_msg(
                         &bot,
                         chat_id,
-                        "⚠️ Task is active. Deactivate it before changing the channel.",
+                        "⚠️ Task is active. Please stop it before changing the channel.",
                         5,
                     )
                     .await;
@@ -967,6 +1057,28 @@ async fn persist_task_wallet_selection(
     if let Some(mut user_data) = get_user_data(&mut con, chat_id).await? {
         if let Some(task) = user_data.tasks.iter_mut().find(|t| t.name == task_name) {
             task.bloom_wallet = wallet.cloned();
+            let updated_task = task.clone();
+            save_user_data(&mut con, chat_id, &user_data).await?;
+            return Ok(Some(updated_task));
+        }
+    }
+    Ok(None)
+}
+
+async fn clear_telegram_task_channel_configuration(
+    redis_client: RedisClient,
+    chat_id: i64,
+    task_name: &str,
+) -> Result<Option<Task>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut con = redis_client.get_multiplexed_async_connection().await?;
+    if let Some(mut user_data) = get_user_data(&mut con, chat_id).await? {
+        if let Some(task) = user_data.tasks.iter_mut().find(|t| t.name == task_name) {
+            task.listen_channels.clear();
+            task.listen_channel_name = None;
+            task.listen_users.clear();
+            task.listen_usernames.clear();
+            task.telegram_channel_is_broadcast = false;
+            task.active = false;
             let updated_task = task.clone();
             save_user_data(&mut con, chat_id, &user_data).await?;
             return Ok(Some(updated_task));

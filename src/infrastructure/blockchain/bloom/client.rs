@@ -98,23 +98,3 @@ pub async fn buy(
     )
     .await
 }
-
-pub async fn sell(
-    mint_address: &str,
-    token_amount: u64,
-    slippage_percent: u32,
-    priority_fee: f64,
-    wallet_address: &str,
-    wallet_label: &str,
-) -> Result<()> {
-    execute_swap(
-        mint_address,
-        token_amount as f64,
-        slippage_percent,
-        priority_fee,
-        wallet_address,
-        wallet_label,
-        "Sell",
-    )
-    .await
-}

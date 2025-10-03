@@ -16,16 +16,6 @@ type MyDialogue = Dialogue<State, teloxide::dispatching::dialogue::InMemStorage<
 pub enum Command {
     #[command(description = "Start the bot and see the main menu.")]
     Start,
-    #[command(
-        description = "Buy a token via Bloom. Usage: /buy <sol_amount> <mint>",
-        parse_with = "split"
-    )]
-    Buy(f64, String),
-    #[command(
-        description = "Sell a token via Bloom. Usage: /sell <token_amount> <mint>",
-        parse_with = "split"
-    )]
-    Sell(u64, String),
 }
 
 pub async fn start(

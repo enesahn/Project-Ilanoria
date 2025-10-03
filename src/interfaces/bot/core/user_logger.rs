@@ -13,10 +13,12 @@ lazy_static! {
     };
 }
 
+#[allow(dead_code)]
 fn get_global_log_key(chat_id: i64) -> String {
     format!("logs:global:{}", chat_id)
 }
 
+#[allow(dead_code)]
 fn get_tx_log_hash_key(chat_id: i64) -> String {
     format!("logs:txs:{}", chat_id)
 }
@@ -25,8 +27,10 @@ fn get_ca_log_hash_key(chat_id: i64) -> String {
     format!("logs:ca_detection:{}", chat_id)
 }
 
+#[allow(dead_code)]
 const LOG_MAXLEN: usize = 2000;
 
+#[allow(dead_code)]
 pub async fn log_to_user(chat_id: i64, level: &str, message: String) {
     let client = REDIS_CLIENT.lock().await;
     let mut con = match client.get_multiplexed_async_connection().await {
@@ -59,6 +63,7 @@ pub async fn log_to_user(chat_id: i64, level: &str, message: String) {
     let _: Result<(), _> = p.query_async(&mut con).await;
 }
 
+#[allow(dead_code)]
 pub async fn log_buffer_to_tx(chat_id: i64, signature: String, buffer: Vec<String>) {
     if signature.is_empty() || buffer.is_empty() {
         return;

@@ -91,20 +91,4 @@ pub enum State {
         menu_message_id: MessageId,
         prompt_message_id: MessageId,
     },
-    ReceiveBuyPriorityFee {
-        menu_message_id: MessageId,
-        prompt_message_id: MessageId,
-    },
-    ReceiveSellPriorityFee {
-        menu_message_id: MessageId,
-        prompt_message_id: MessageId,
-    },
-    ReceiveCustomBuyAmount {
-        prompt_message_id: MessageId,
-        mint: String,
-    },
-    ReceiveCustomSellPercentage {
-        prompt_message_id: MessageId,
-        mint: String,
-    },
 }

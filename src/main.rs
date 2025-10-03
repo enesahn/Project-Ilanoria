@@ -22,7 +22,6 @@ use interfaces::bot::handlers::{
     callbacks::callback_handler,
     start::{Command, start},
     text::text_handler,
-    trade::trade_handler,
 };
 use interfaces::bot::user::client::UserClientHandle;
 use interfaces::console::menu::MenuManager;
@@ -96,27 +95,20 @@ async fn handle_commands(
     bot: Bot,
     dialogue: MyDialogue,
     msg: Message,
-    cmd: Command,
+    _cmd: Command,
     redis_client: RedisClient,
     sol_price_state: SolPriceState,
     rpc_clients: RpcClients,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match cmd {
-        Command::Start => {
-            start(
-                bot,
-                dialogue,
-                msg,
-                redis_client,
-                sol_price_state,
-                rpc_clients,
-            )
-            .await?
-        }
-        Command::Buy(..) | Command::Sell(..) => {
-            trade_handler(bot, msg, cmd, redis_client, rpc_clients).await?
-        }
-    };
+    start(
+        bot,
+        dialogue,
+        msg,
+        redis_client,
+        sol_price_state,
+        rpc_clients,
+    )
+    .await?;
     Ok(())
 }
 
@@ -252,12 +244,8 @@ async fn main() {
         .branch(
             dptree::filter_map(|state: State| match state {
                 State::ReceiveSlippage { .. }
-                | State::ReceiveBuyPriorityFee { .. }
-                | State::ReceiveSellPriorityFee { .. }
                 | State::ReceiveImportKey { .. }
                 | State::ReceiveWalletName { .. }
-                | State::ReceiveCustomBuyAmount { .. }
-                | State::ReceiveCustomSellPercentage { .. }
                 | State::TaskSelectChannelSearch { .. } => Some(()),
                 _ => None,
             })

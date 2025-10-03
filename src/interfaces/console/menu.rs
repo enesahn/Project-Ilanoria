@@ -1135,7 +1135,8 @@ impl MenuManager {
             println!(
                 "  {} {}",
                 "»".bright_cyan(),
-                "Real-time stream active. Type [q] or [0] to return.".truecolor(150, 150, 150)
+                "Real-time stream active. Type [q] or [0] to return, [c] to clear."
+                    .truecolor(150, 150, 150)
             );
         }
 
@@ -1191,9 +1192,16 @@ impl MenuManager {
                                 self.state = MenuState::UserTaskLogList { user_id };
                                 self.skip_input_cycle = true;
                                 break;
+                            } else if trimmed == "c" {
+                                clear_footer();
+                                ConsoleUI::clear_screen();
+                                ConsoleUI::print_header(&format!("Live Logs • {}", task_name));
+                                ConsoleUI::print_info("Log view cleared. Waiting for new events...\n");
+                                render_footer();
+                            } else {
+                                clear_prompt_line();
+                                draw_prompt_line();
                             }
-                            clear_prompt_line();
-                            draw_prompt_line();
                         }
                         Err(e) => {
                             clear_footer();
@@ -1279,7 +1287,8 @@ impl MenuManager {
             println!(
                 "  {} {}",
                 "»".bright_cyan(),
-                "Real-time stream active. Type [q] or [0] to return.".truecolor(150, 150, 150)
+                "Real-time stream active. Type [q] or [0] to return, [c] to clear."
+                    .truecolor(150, 150, 150)
             );
         }
 
@@ -1334,9 +1343,16 @@ impl MenuManager {
                                 self.state = MenuState::IndexerLogOverview;
                                 self.skip_input_cycle = true;
                                 break;
+                            } else if trimmed == "c" {
+                                clear_footer();
+                                ConsoleUI::clear_screen();
+                                ConsoleUI::print_header("Live Indexer Mint Logs");
+                                ConsoleUI::print_info("Log view cleared. Waiting for new mints...\n");
+                                render_footer();
+                            } else {
+                                clear_prompt_line();
+                                draw_prompt_line();
                             }
-                            clear_prompt_line();
-                            draw_prompt_line();
                         }
                         Err(error) => {
                             clear_footer();

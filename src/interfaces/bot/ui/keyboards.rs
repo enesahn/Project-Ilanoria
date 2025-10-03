@@ -431,10 +431,6 @@ pub fn settings_menu_keyboard() -> InlineKeyboardMarkup {
             "📊 Edit Slippage",
             "edit_slippage",
         )],
-        vec![
-            InlineKeyboardButton::callback("✍️ Edit Buy Fee", "edit_buy_priority_fee"),
-            InlineKeyboardButton::callback("✍️ Edit Sell Fee", "edit_sell_priority_fee"),
-        ],
         vec![InlineKeyboardButton::callback(
             "← Back to Main Menu",
             "main_menu",
@@ -443,25 +439,10 @@ pub fn settings_menu_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(buttons)
 }
 
-pub fn token_info_keyboard(config: &UserConfig, _mint: &str) -> InlineKeyboardMarkup {
-    let fee_text = format!(
-        "⚙️ B/S Fee: {}/{} SOL",
-        config.buy_priority_fee_sol, config.sell_priority_fee_sol
-    );
-
+pub fn token_info_keyboard(_config: &UserConfig, _mint: &str) -> InlineKeyboardMarkup {
     let buttons = vec![
         vec![InlineKeyboardButton::callback("↻ Refresh", "r")],
-        vec![
-            InlineKeyboardButton::callback("💰 Buy 1 SOL", "b_1"),
-            InlineKeyboardButton::callback("💰 Buy 3 SOL", "b_3"),
-            InlineKeyboardButton::callback("💰 Buy X SOL", "b_custom"),
-        ],
-        vec![InlineKeyboardButton::callback(fee_text, "view_cfg")],
-        vec![
-            InlineKeyboardButton::callback("📉 Sell 50%", "s_50"),
-            InlineKeyboardButton::callback("📉 Sell 100%", "s_100"),
-            InlineKeyboardButton::callback("📉 Sell X%", "s_custom"),
-        ],
+        vec![InlineKeyboardButton::callback("⚙️ Settings", "view_cfg")],
     ];
     InlineKeyboardMarkup::new(buttons)
 }

@@ -44,13 +44,8 @@ pub async fn callback_handler(
             "set_default_",
             "remove_wallet_",
         ];
-        let trade_actions = ["r", "b_", "s_"];
-        let settings_actions = [
-            "view_cfg",
-            "edit_slippage",
-            "edit_buy_priority_fee",
-            "edit_sell_priority_fee",
-        ];
+        let trade_actions = ["r"];
+        let settings_actions = ["view_cfg", "edit_slippage"];
 
         if data.starts_with("task_") || data == "view_tasks" || data == "create_task" {
             tasks::handle_task_callbacks(
