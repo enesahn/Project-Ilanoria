@@ -3,6 +3,13 @@ use crate::interfaces::bot::data::{Task, get_user_data};
 use crate::{BLOOM_WS_CONNECTION, BloomWsConnectionStatus};
 use redis::Client as RedisClient;
 
+#[derive(Clone, Debug)]
+pub struct WalletDisplayInfo {
+    pub label: Option<String>,
+    pub address: String,
+    pub balance_sol: Option<f64>,
+}
+
 pub fn escape_markdown(text: &str) -> String {
     text.replace("\\", "\\\\")
         .replace("_", "\\_")
@@ -81,6 +88,7 @@ pub async fn generate_task_detail_text(
     _chat_id: i64,
     task: &Task,
     sol_price_state: SolPriceState,
+    selected_wallet: Option<&WalletDisplayInfo>,
 ) -> String {
     use crate::interfaces::bot::data::types::Platform;
 
@@ -101,7 +109,20 @@ pub async fn generate_task_detail_text(
         Platform::Discord => "Discord",
     };
 
-    let bloom_wallet_display = format_task_bloom_wallet(task);
+    let price_guard = sol_price_state.read().await;
+    let sol_price_value = (*price_guard).map(|value| value as f64);
+    drop(price_guard);
+
+    let (wallet_label, wallet_balance) =
+        format_task_bloom_wallet(task, selected_wallet);
+    let wallet_block = match wallet_balance {
+        Some(balance) => format!("🏦 *Bloom Wallet:* `{}` `{}`", wallet_label, balance),
+        None => format!("🏦 *Bloom Wallet:* `{}`", wallet_label),
+    };
+    let heading = format!(
+        "🎯 *{}*",
+        escape_markdown(&format!("Task Configuration - {}", task.name))
+    );
 
     let platform_details = match task.platform {
         Platform::Telegram => {
@@ -178,10 +199,6 @@ pub async fn generate_task_detail_text(
         }
     };
 
-    let price_guard = sol_price_state.read().await;
-    let sol_price_value = (*price_guard).map(|value| value as f64);
-    drop(price_guard);
-
     let buy_amount_display = format_sol_with_usd(task.buy_amount_sol, sol_price_value);
     let buy_fee_display = format_sol_with_usd(task.buy_priority_fee_sol, sol_price_value);
 
@@ -202,28 +219,27 @@ pub async fn generate_task_detail_text(
     };
 
     format!(
-        "🎯 *Task Configuration \\- {}*\n
-\
-        📊 *Platform:* `{}`\n
-\
-        🏦 *Bloom Wallet:* `{}`\n
-\
-        {}\n
-\
-        🚫 *Blacklist Words:* `{}`\n
-\
-        💰 *Fees & Slippage*
-\
-        • *Buy Amount:* `{}`
-\
-        • *Buy Fee:* `{}`
-\
-        • *Buy Slippage:* `{}%`\n
-\
-        {}{}",
-        escape_markdown(&task.name),
+        concat!(
+            "{}\n",
+            "\n",
+            "📊 *Platform:* `{}`\n",
+            "\n",
+            "{}\n",
+            "\n",
+            "{}\n",
+            "\n",
+            "🚫 *Blacklist Words:* `{}`\n",
+            "\n",
+            "💰 *Fees & Slippage*\n",
+            "• *Buy Amount:* `{}`\n",
+            "• *Buy Fee:* `{}`\n",
+            "• *Buy Slippage:* `{}%`\n",
+            "\n",
+            "{}{}"
+        ),
+        heading,
         escape_markdown(platform_str),
-        escape_markdown(&bloom_wallet_display),
+        wallet_block,
         platform_details,
         escape_markdown(&blacklist_str),
         escape_markdown(&buy_amount_display),
@@ -238,16 +254,20 @@ pub async fn generate_task_settings_text(
     _redis_client: RedisClient,
     _chat_id: i64,
     task: &Task,
+    _sol_price_state: SolPriceState,
+    selected_wallet: Option<&WalletDisplayInfo>,
 ) -> String {
-    let bloom_wallet_display = format_task_bloom_wallet(task);
+    let (wallet_label, wallet_balance) =
+        format_task_bloom_wallet(task, selected_wallet);
+    let wallet_line = match wallet_balance {
+        Some(balance) => format!("🏦 *Bloom Wallet:* `{}` `{}`", wallet_label, balance),
+        None => format!("🏦 *Bloom Wallet:* `{}`", wallet_label),
+    };
     let mut sections = vec![format!(
         "⚙️ *Task Settings: {}*",
         escape_markdown(&task.name)
     )];
-    sections.push(format!(
-        "🏦 *Bloom Wallet:* `{}`",
-        escape_markdown(&bloom_wallet_display)
-    ));
+    sections.push(wallet_line);
     let has_telegram_session = task.has_telegram_user_session();
     let telegram_status = if has_telegram_session {
         task.telegram_username_display()
@@ -287,19 +307,96 @@ pub async fn generate_task_settings_text(
     sections.join("\n\n")
 }
 
-pub fn generate_task_wallets_text(task: &Task, current_display: &str) -> String {
-    format!(
-        "👛 *Bloom Wallets: {}*\n\nCurrent selection: `{}`\n\nSelect a wallet below to assign it to this task\\.",
-        escape_markdown(&task.name),
-        escape_markdown(current_display)
+pub fn generate_task_wallets_text(
+    task: &Task,
+    selected_wallet: Option<&WalletDisplayInfo>,
+    displayed_wallets: &[WalletDisplayInfo],
+    sol_price: Option<f64>,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "👛 *Bloom Wallets · {}*",
+        escape_markdown(&task.name)
+    ));
+    lines.push(String::new());
+
+    let selected_in_page = selected_wallet
+        .map(|wallet| {
+            displayed_wallets
+                .iter()
+                .any(|entry| entry.address == wallet.address)
+        })
+        .unwrap_or(false);
+
+    match (selected_wallet, selected_in_page) {
+        (Some(wallet), false) => {
+            lines.extend(build_wallet_entry_lines(wallet, "▪️", sol_price));
+            lines.push(String::new());
+        }
+        (None, _) => {
+            lines.push(escape_markdown("No wallet selected."));
+            lines.push(String::new());
+        }
+        _ => {}
+    }
+
+    for (index, wallet) in displayed_wallets.iter().enumerate() {
+        let is_selected = selected_wallet
+            .map(|selected| selected.address == wallet.address)
+            .unwrap_or(false);
+        let marker = if is_selected { "▪️" } else { "▫️" };
+        lines.extend(build_wallet_entry_lines(wallet, marker, sol_price));
+        if index + 1 < displayed_wallets.len() {
+            lines.push(String::new());
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(escape_markdown(
+        "Select a wallet below to assign it to this task.",
+    ));
+    lines.join(
+        "
+",
     )
 }
 
-fn format_task_bloom_wallet(task: &Task) -> String {
-    if let Some(wallet) = task.bloom_wallet.as_ref() {
-        return format_wallet_label(wallet.label.as_deref(), &wallet.address);
+fn build_wallet_entry_lines(
+    wallet: &WalletDisplayInfo,
+    marker: &str,
+    sol_price: Option<f64>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let label_text = escape_markdown(&format_wallet_label(
+        wallet.label.as_deref(),
+        &wallet.address,
+    ));
+    let address_text = escape_markdown(&wallet.address);
+    let balance_text = escape_markdown(&format_wallet_balance_text(wallet.balance_sol, sol_price));
+    lines.push(format!("{} {}", marker, label_text));
+    lines.push(format!("   🔑 {}", address_text));
+    lines.push(format!("   💰 {}", balance_text));
+    lines
+}
+
+fn format_task_bloom_wallet(
+    task: &Task,
+    selected_wallet: Option<&WalletDisplayInfo>,
+) -> (String, Option<String>) {
+    if let Some(wallet) = selected_wallet {
+        let label = format_wallet_label(wallet.label.as_deref(), &wallet.address);
+        let label = escape_markdown(&label);
+        let balance = wallet.balance_sol.map(|amount| {
+            let sol_text = format_trimmed_sol(amount);
+            escape_markdown(&format!("{} SOL", sol_text))
+        });
+        return (label, balance);
     }
-    "Not set".to_string()
+    if let Some(wallet) = task.bloom_wallet.as_ref() {
+        let label = format_wallet_label(wallet.label.as_deref(), &wallet.address);
+        return (escape_markdown(&label), None);
+    }
+    (escape_markdown("Not set"), None)
 }
 
 fn format_wallet_label(label: Option<&str>, address: &str) -> String {
@@ -332,6 +429,13 @@ fn format_sol_with_usd(amount: f64, price_per_sol: Option<f64>) -> String {
         format!("{} SOL (${usd_text})", sol_text)
     } else {
         format!("{} SOL", sol_text)
+    }
+}
+
+fn format_wallet_balance_text(balance_sol: Option<f64>, price_per_sol: Option<f64>) -> String {
+    match balance_sol {
+        Some(amount) => format_sol_with_usd(amount, price_per_sol),
+        None => "Balance unavailable".to_string(),
     }
 }
 

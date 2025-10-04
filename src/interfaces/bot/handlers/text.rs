@@ -3,6 +3,7 @@ use parking_lot::Mutex;
 use redis::Client as RedisClient;
 use regex::Regex;
 use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 use std::sync::Arc;
 use teloxide::prelude::*;
 
@@ -12,8 +13,9 @@ use crate::interfaces::bot::user::client::{
     UserClientHandle, get_token_info_from_bloom, search_dialogs,
 };
 use crate::interfaces::bot::{
-    State, channel_selection_keyboard, escape_markdown, generate_task_detail_text, get_user_data,
-    save_user_data, task_detail_keyboard, token_info_keyboard,
+    State, Task, WalletDisplayInfo, channel_selection_keyboard, escape_markdown,
+    generate_task_detail_text, get_user_data, save_user_data, task_detail_keyboard,
+    token_info_keyboard,
 };
 
 type MyDialogue = Dialogue<State, teloxide::dispatching::dialogue::InMemStorage<State>>;
@@ -176,6 +178,63 @@ pub async fn format_token_info_message(
     )
 }
 
+async fn compose_task_detail_text(
+    redis_client: RedisClient,
+    chat_id: i64,
+    task: &Task,
+    sol_price_state: SolPriceState,
+    rpc_clients: RpcClients,
+) -> String {
+    let selected_wallet = load_selected_wallet_display(task, &rpc_clients).await;
+    generate_task_detail_text(
+        redis_client,
+        chat_id,
+        task,
+        sol_price_state,
+        selected_wallet.as_ref(),
+    )
+    .await
+}
+
+async fn load_selected_wallet_display(
+    task: &Task,
+    rpc_clients: &RpcClients,
+) -> Option<WalletDisplayInfo> {
+    if let Some(wallet) = task.bloom_wallet.as_ref() {
+        Some(build_wallet_display(wallet, rpc_clients).await)
+    } else {
+        None
+    }
+}
+
+async fn build_wallet_display(
+    wallet: &crate::interfaces::bot::data::BloomWalletInfo,
+    rpc_clients: &RpcClients,
+) -> WalletDisplayInfo {
+    let balance_sol = fetch_wallet_balance(&wallet.address, rpc_clients).await;
+    WalletDisplayInfo {
+        label: wallet.label.clone(),
+        address: wallet.address.clone(),
+        balance_sol,
+    }
+}
+
+async fn fetch_wallet_balance(address: &str, rpc_clients: &RpcClients) -> Option<f64> {
+    match Pubkey::from_str(address) {
+        Ok(pubkey) => match rpc_clients.helius_client.get_balance(&pubkey).await {
+            Ok(lamports) => Some(lamports as f64 / 1_000_000_000.0),
+            Err(err) => {
+                log::warn!("Failed to fetch SOL balance for {}: {}", address, err);
+                None
+            }
+        },
+        Err(err) => {
+            log::warn!("Invalid wallet address {}: {}", address, err);
+            None
+        }
+    }
+}
+
 pub fn parse_mint_from_text_robust(text: &str) -> Option<String> {
     MINT_REGEX_ROBUST.find(text).map(|m| m.as_str().to_string())
 }
@@ -297,11 +356,12 @@ pub async fn text_handler(
                     save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                     let task = &user_data.tasks[task_index];
-                    let task_text = generate_task_detail_text(
+                    let task_text = compose_task_detail_text(
                         redis_client.clone(),
                         chat_id.0,
                         task,
                         sol_price_state.clone(),
+                        rpc_clients.clone(),
                     )
                     .await;
                     bot.edit_message_text(chat_id, menu_message_id, task_text)
@@ -325,11 +385,12 @@ pub async fn text_handler(
                         save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                         let task = &user_data.tasks[task_index];
-                        let task_text = generate_task_detail_text(
+                        let task_text = compose_task_detail_text(
                             redis_client.clone(),
                             chat_id.0,
                             task,
                             sol_price_state.clone(),
+                            rpc_clients.clone(),
                         )
                         .await;
                         bot.edit_message_text(chat_id, menu_message_id, task_text)
@@ -354,11 +415,12 @@ pub async fn text_handler(
                         save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                         let task = &user_data.tasks[task_index];
-                        let task_text = generate_task_detail_text(
+                        let task_text = compose_task_detail_text(
                             redis_client.clone(),
                             chat_id.0,
                             task,
                             sol_price_state.clone(),
+                            rpc_clients.clone(),
                         )
                         .await;
                         bot.edit_message_text(chat_id, menu_message_id, task_text)
@@ -383,11 +445,12 @@ pub async fn text_handler(
                         save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                         let task = &user_data.tasks[task_index];
-                        let task_text = generate_task_detail_text(
+                        let task_text = compose_task_detail_text(
                             redis_client.clone(),
                             chat_id.0,
                             task,
                             sol_price_state.clone(),
+                            rpc_clients.clone(),
                         )
                         .await;
                         bot.edit_message_text(chat_id, menu_message_id, task_text)
@@ -410,11 +473,12 @@ pub async fn text_handler(
                     save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                     let task = &user_data.tasks[task_index];
-                    let task_text = generate_task_detail_text(
+                    let task_text = compose_task_detail_text(
                         redis_client.clone(),
                         chat_id.0,
                         task,
                         sol_price_state.clone(),
+                        rpc_clients.clone(),
                     )
                     .await;
                     bot.edit_message_text(chat_id, menu_message_id, task_text)
@@ -482,11 +546,12 @@ pub async fn text_handler(
                                 save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                                 let task = &user_data.tasks[task_index];
-                                let task_text = generate_task_detail_text(
+                                let task_text = compose_task_detail_text(
                                     redis_client.clone(),
                                     chat_id.0,
                                     task,
                                     sol_price_state.clone(),
+                                    rpc_clients.clone(),
                                 )
                                 .await;
                                 bot.edit_message_text(chat_id, menu_message_id, task_text)
@@ -521,11 +586,12 @@ pub async fn text_handler(
                     save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                     let task = &user_data.tasks[task_index];
-                    let task_text = generate_task_detail_text(
+                    let task_text = compose_task_detail_text(
                         redis_client.clone(),
                         chat_id.0,
                         task,
                         sol_price_state.clone(),
+                        rpc_clients.clone(),
                     )
                     .await;
                     bot.edit_message_text(chat_id, menu_message_id, task_text)
@@ -551,11 +617,12 @@ pub async fn text_handler(
                     save_user_data(&mut con, chat_id.0, &user_data).await?;
 
                     let task = &user_data.tasks[task_index];
-                    let task_text = generate_task_detail_text(
+                    let task_text = compose_task_detail_text(
                         redis_client.clone(),
                         chat_id.0,
                         task,
                         sol_price_state.clone(),
+                        rpc_clients.clone(),
                     )
                     .await;
                     bot.edit_message_text(chat_id, menu_message_id, task_text)

@@ -1,5 +1,8 @@
 use crate::USER_CLIENT_HANDLE;
 use crate::application::pricing::SolPriceState;
+use crate::infrastructure::blockchain::RpcClients;
+use crate::interfaces::bot::WalletDisplayInfo;
+use crate::interfaces::bot::data::BloomWalletInfo;
 use crate::interfaces::bot::data::types::Platform;
 use crate::interfaces::bot::user::client::{
     UserClientHandle, authenticate_task_user_via_qr, get_chat_admins, is_channel_member,
@@ -7,7 +10,7 @@ use crate::interfaces::bot::user::client::{
 };
 use crate::interfaces::bot::utils::fetch_bloom_wallets;
 use crate::interfaces::bot::{
-    State, Task, channel_selection_keyboard, generate_task_detail_text,
+    ITEMS_PER_PAGE, State, Task, channel_selection_keyboard, generate_task_detail_text,
     generate_task_settings_text, generate_task_wallets_text, generate_tasks_text, get_user_data,
     save_user_data, send_cleanup_msg, task_delete_confirmation_keyboard, task_detail_keyboard,
     task_settings_keyboard, task_telegram_linking_keyboard, task_wallets_keyboard,
@@ -17,6 +20,8 @@ use grammers_client::Client as TelegramClient;
 use parking_lot::Mutex;
 use rand::Rng;
 use redis::Client as RedisClient;
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::MessageId;
@@ -43,6 +48,7 @@ pub async fn handle_task_callbacks(
     dialogue: MyDialogue,
     sol_price_state: SolPriceState,
     user_client_handle: Arc<Mutex<Option<UserClientHandle>>>,
+    rpc_clients: RpcClients,
     client_sender: Sender<TelegramClient>,
 ) -> HandlerResult {
     if let Some(message) = q.message.clone() {
@@ -146,6 +152,8 @@ pub async fn handle_task_callbacks(
                             &task_name,
                             &wallets,
                             requested_page,
+                            sol_price_state.clone(),
+                            rpc_clients.clone(),
                         )
                         .await?;
                         dialogue
@@ -183,6 +191,8 @@ pub async fn handle_task_callbacks(
                                 &task_name,
                                 &wallets,
                                 new_page,
+                                sol_price_state.clone(),
+                                rpc_clients.clone(),
                             )
                             .await?;
                             dialogue
@@ -228,6 +238,8 @@ pub async fn handle_task_callbacks(
                             &task_name,
                             &wallets,
                             page,
+                            sol_price_state.clone(),
+                            rpc_clients.clone(),
                         )
                         .await?;
                         dialogue
@@ -252,6 +264,8 @@ pub async fn handle_task_callbacks(
                         task_name,
                         &wallets,
                         0,
+                        sol_price_state.clone(),
+                        rpc_clients.clone(),
                     )
                     .await?;
                     dialogue
@@ -270,8 +284,16 @@ pub async fn handle_task_callbacks(
                 }
             }
         } else if let Some(task_name) = data.strip_prefix("task_settings_") {
-            render_task_settings_view(&bot, redis_client.clone(), chat_id, message.id, task_name)
-                .await?;
+            render_task_settings_view(
+                &bot,
+                redis_client.clone(),
+                chat_id,
+                message.id,
+                task_name,
+                sol_price_state.clone(),
+                rpc_clients.clone(),
+            )
+            .await?;
             dialogue
                 .update(State::TaskSettingsMenu {
                     _task_name: task_name.to_string(),
@@ -280,11 +302,12 @@ pub async fn handle_task_callbacks(
                 .await?;
         } else if let Some(task_name) = data.strip_prefix("task_detail_") {
             if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, task_name).await {
-                let task_text = generate_task_detail_text(
+                let task_text = build_task_detail_text(
                     redis_client.clone(),
                     chat_id.0,
                     &task,
                     sol_price_state.clone(),
+                    rpc_clients.clone(),
                 )
                 .await;
                 bot.edit_message_text(chat_id, message.id, task_text)
@@ -298,11 +321,12 @@ pub async fn handle_task_callbacks(
         } else if let Some(task_name) = data.strip_prefix("task_toggle_inform_") {
             toggle_task_inform_only(redis_client.clone(), chat_id.0, task_name).await?;
             if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, task_name).await {
-                let task_text = generate_task_detail_text(
+                let task_text = build_task_detail_text(
                     redis_client.clone(),
                     chat_id.0,
                     &task,
                     sol_price_state.clone(),
+                    rpc_clients.clone(),
                 )
                 .await;
                 bot.edit_message_text(chat_id, message.id, task_text)
@@ -316,11 +340,12 @@ pub async fn handle_task_callbacks(
                     if let Some(error_msg) = activation_requirement_error(&task) {
                         bot.answer_callback_query(q.id.clone()).await?;
                         let _ = send_cleanup_msg(&bot, chat_id, error_msg, 5).await;
-                        let task_text = generate_task_detail_text(
+                        let task_text = build_task_detail_text(
                             redis_client.clone(),
                             chat_id.0,
                             &task,
                             sol_price_state.clone(),
+                            rpc_clients.clone(),
                         )
                         .await;
                         bot.edit_message_text(chat_id, message.id, task_text)
@@ -397,11 +422,12 @@ pub async fn handle_task_callbacks(
                                     }
                                 };
 
-                                let task_text = generate_task_detail_text(
+                                let task_text = build_task_detail_text(
                                     redis_client.clone(),
                                     chat_id.0,
                                     &task_for_view,
                                     sol_price_state.clone(),
+                                    rpc_clients.clone(),
                                 )
                                 .await;
                                 bot.edit_message_text(chat_id, message.id, task_text)
@@ -434,11 +460,12 @@ pub async fn handle_task_callbacks(
                 if let Some(updated_task) =
                     get_task_by_name(redis_client.clone(), chat_id.0, task_name).await
                 {
-                    let task_text = generate_task_detail_text(
+                    let task_text = build_task_detail_text(
                         redis_client.clone(),
                         chat_id.0,
                         &updated_task,
                         sol_price_state.clone(),
+                        rpc_clients.clone(),
                     )
                     .await;
                     bot.edit_message_text(chat_id, message.id, task_text)
@@ -571,11 +598,12 @@ pub async fn handle_task_callbacks(
                     if let Some(updated_task) =
                         user_data.tasks.iter().find(|t| t.name == *task_name)
                     {
-                        let task_text = generate_task_detail_text(
+                        let task_text = build_task_detail_text(
                             redis_client.clone(),
                             chat_id.0,
                             updated_task,
                             sol_price_state.clone(),
+                            rpc_clients.clone(),
                         )
                         .await;
                         bot.edit_message_text(chat_id, message.id, task_text)
@@ -603,11 +631,12 @@ pub async fn handle_task_callbacks(
                     if let Some(updated_task) =
                         user_data.tasks.iter().find(|t| t.name == *task_name)
                     {
-                        let task_text = generate_task_detail_text(
+                        let task_text = build_task_detail_text(
                             redis_client.clone(),
                             chat_id.0,
                             updated_task,
                             sol_price_state.clone(),
+                            rpc_clients.clone(),
                         )
                         .await;
                         bot.edit_message_text(chat_id, message.id, task_text)
@@ -654,8 +683,16 @@ pub async fn handle_task_callbacks(
                 drop(pending);
             }
 
-            render_task_settings_view(&bot, redis_client.clone(), chat_id, message.id, &task_name)
-                .await?;
+            render_task_settings_view(
+                &bot,
+                redis_client.clone(),
+                chat_id,
+                message.id,
+                &task_name,
+                sol_price_state.clone(),
+                rpc_clients.clone(),
+            )
+            .await?;
             dialogue
                 .update(State::TaskSettingsMenu {
                     _task_name: task_name,
@@ -798,6 +835,8 @@ pub async fn handle_task_callbacks(
                                 chat_id,
                                 menu_message_id,
                                 &task_name,
+                                sol_price_state.clone(),
+                                rpc_clients.clone(),
                             )
                             .await?;
                             dialogue
@@ -1029,11 +1068,12 @@ pub async fn handle_task_callbacks(
                                     )
                                     .await
                                     {
-                                        let task_text = generate_task_detail_text(
+                                        let task_text = build_task_detail_text(
                                             redis_client.clone(),
                                             chat_id.0,
                                             &updated_task,
                                             sol_price_state.clone(),
+                                            rpc_clients.clone(),
                                         )
                                         .await;
                                         bot.edit_message_text(chat_id, message.id, task_text)
@@ -1121,11 +1161,12 @@ pub async fn handle_task_callbacks(
                 }
                 save_user_data(&mut con, chat_id.0, &user_data).await?;
                 if let Some(task) = user_data.tasks.iter().find(|t| t.name == task_name) {
-                    let task_text = crate::interfaces::bot::menu::generate_task_detail_text(
+                    let task_text = build_task_detail_text(
                         redis_client.clone(),
                         chat_id.0,
                         task,
                         sol_price_state.clone(),
+                        rpc_clients.clone(),
                     )
                     .await;
                     if let Some(configuration_message_id) = configuration_message_id_opt {
@@ -1262,15 +1303,107 @@ async fn get_task_by_name(redis_client: RedisClient, chat_id: i64, name: &str) -
     tasks.into_iter().find(|t| t.name == *name)
 }
 
+async fn build_task_detail_text(
+    redis_client: RedisClient,
+    chat_id: i64,
+    task: &Task,
+    sol_price_state: SolPriceState,
+    rpc_clients: RpcClients,
+) -> String {
+    let selected_wallet = load_selected_wallet(task, &rpc_clients).await;
+    generate_task_detail_text(
+        redis_client,
+        chat_id,
+        task,
+        sol_price_state,
+        selected_wallet.as_ref(),
+    )
+    .await
+}
+
+async fn build_task_settings_text(
+    redis_client: RedisClient,
+    chat_id: i64,
+    task: &Task,
+    sol_price_state: SolPriceState,
+    rpc_clients: RpcClients,
+) -> String {
+    let selected_wallet = load_selected_wallet(task, &rpc_clients).await;
+    generate_task_settings_text(
+        redis_client,
+        chat_id,
+        task,
+        sol_price_state,
+        selected_wallet.as_ref(),
+    )
+    .await
+}
+
+async fn load_selected_wallet(task: &Task, rpc_clients: &RpcClients) -> Option<WalletDisplayInfo> {
+    if let Some(wallet) = task.bloom_wallet.as_ref() {
+        Some(build_wallet_display(wallet, rpc_clients).await)
+    } else {
+        None
+    }
+}
+
+async fn build_wallet_display(
+    wallet: &BloomWalletInfo,
+    rpc_clients: &RpcClients,
+) -> WalletDisplayInfo {
+    let balance_sol = fetch_wallet_balance(&wallet.address, rpc_clients).await;
+    WalletDisplayInfo {
+        label: wallet.label.clone(),
+        address: wallet.address.clone(),
+        balance_sol,
+    }
+}
+
+async fn collect_wallet_page(
+    wallets: &[BloomWalletInfo],
+    rpc_clients: &RpcClients,
+) -> Vec<WalletDisplayInfo> {
+    let mut result = Vec::with_capacity(wallets.len());
+    for wallet in wallets {
+        result.push(build_wallet_display(wallet, rpc_clients).await);
+    }
+    result
+}
+
+async fn fetch_wallet_balance(address: &str, rpc_clients: &RpcClients) -> Option<f64> {
+    match Pubkey::from_str(address) {
+        Ok(pubkey) => match rpc_clients.helius_client.get_balance(&pubkey).await {
+            Ok(lamports) => Some(lamports as f64 / 1_000_000_000.0),
+            Err(err) => {
+                log::warn!("Failed to fetch SOL balance for {}: {}", address, err);
+                None
+            }
+        },
+        Err(err) => {
+            log::warn!("Invalid wallet address {}: {}", address, err);
+            None
+        }
+    }
+}
+
 async fn render_task_settings_view(
     bot: &Bot,
     redis_client: RedisClient,
     chat_id: ChatId,
     message_id: MessageId,
     task_name: &str,
+    sol_price_state: SolPriceState,
+    rpc_clients: RpcClients,
 ) -> HandlerResult {
     if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, task_name).await {
-        let text = generate_task_settings_text(redis_client.clone(), chat_id.0, &task).await;
+        let text = build_task_settings_text(
+            redis_client.clone(),
+            chat_id.0,
+            &task,
+            sol_price_state.clone(),
+            rpc_clients.clone(),
+        )
+        .await;
         bot.edit_message_text(chat_id, message_id, text)
             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
             .reply_markup(task_settings_keyboard(&task))
@@ -1285,16 +1418,32 @@ async fn render_task_wallets_view(
     chat_id: ChatId,
     message_id: MessageId,
     task_name: &str,
-    wallets: &[crate::interfaces::bot::data::BloomWalletInfo],
+    wallets: &[BloomWalletInfo],
     page: usize,
+    sol_price_state: SolPriceState,
+    rpc_clients: RpcClients,
 ) -> HandlerResult {
     if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, task_name).await {
         let selected_address = task
             .bloom_wallet
             .as_ref()
             .map(|wallet| wallet.address.as_str());
-        let current_display = format_task_wallet_display(&task);
-        let text = generate_task_wallets_text(&task, &current_display);
+
+        let start = (page * ITEMS_PER_PAGE).min(wallets.len());
+        let end = (start + ITEMS_PER_PAGE).min(wallets.len());
+        let page_wallets = collect_wallet_page(&wallets[start..end], &rpc_clients).await;
+        let selected_wallet = load_selected_wallet(&task, &rpc_clients).await;
+
+        let price_guard = sol_price_state.read().await;
+        let sol_price_value = (*price_guard).map(|value| value as f64);
+        drop(price_guard);
+
+        let text = generate_task_wallets_text(
+            &task,
+            selected_wallet.as_ref(),
+            &page_wallets,
+            sol_price_value,
+        );
         let keyboard = task_wallets_keyboard(task_name, wallets, selected_address, page);
         bot.edit_message_text(chat_id, message_id, text)
             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
@@ -1302,35 +1451,6 @@ async fn render_task_wallets_view(
             .await?;
     }
     Ok(())
-}
-
-fn format_task_wallet_display(task: &Task) -> String {
-    if let Some(wallet) = task.bloom_wallet.as_ref() {
-        return compose_wallet_label(wallet.label.as_deref(), &wallet.address);
-    }
-    "Not set".to_string()
-}
-
-fn compose_wallet_label(label: Option<&str>, address: &str) -> String {
-    let trimmed = label.map(|value| value.trim()).unwrap_or("");
-    let short_address = abbreviate_wallet_address(address);
-    if trimmed.is_empty() {
-        short_address
-    } else {
-        format!("{} ({})", trimmed, short_address)
-    }
-}
-
-fn abbreviate_wallet_address(address: &str) -> String {
-    const PREFIX: usize = 6;
-    const SUFFIX: usize = 4;
-    if address.len() <= PREFIX + SUFFIX {
-        address.to_string()
-    } else {
-        let prefix = &address[..PREFIX];
-        let suffix = &address[address.len() - SUFFIX..];
-        format!("{}...{}", prefix, suffix)
-    }
 }
 
 async fn persist_task_wallet_selection(

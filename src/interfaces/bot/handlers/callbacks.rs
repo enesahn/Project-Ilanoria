@@ -51,6 +51,7 @@ pub async fn callback_handler(
                 dialogue,
                 sol_price_state.clone(),
                 user_client_handle.clone(),
+                rpc_clients.clone(),
                 client_sender.clone(),
             )
             .await?;

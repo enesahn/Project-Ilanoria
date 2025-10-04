@@ -1,7 +1,7 @@
 use crate::application::health::worker::{WarmerState, WarmupStatus};
 use crate::application::indexer::{
-    IndexerMintLogEntry, indexer_mint_log_counters, ram_index_stats, recent_indexer_mint_logs,
-    redis_index_stats, subscribe_indexer_mint_logs,
+    IndexerMintLogEntry, indexer_mint_log_counters, ram_index_stats, redis_index_stats,
+    subscribe_indexer_mint_logs,
 };
 use crate::infrastructure::logging::suppress_stdout_logs;
 use crate::interfaces::bot::data::storage::get_user_tasks;
@@ -9,7 +9,7 @@ use crate::interfaces::bot::tasks::subscribe_task_logs;
 use crate::interfaces::bot::{clear_user_logs, get_all_user_ids, get_user_logs};
 use crate::interfaces::console::console::ConsoleUI;
 use crate::{BLOOM_WS_CONNECTION, BloomWsConnectionStatus};
-use chrono::{DateTime, Local, SecondsFormat};
+use chrono::{DateTime, SecondsFormat};
 use colored::*;
 use std::io::Write as _;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
@@ -277,18 +277,6 @@ impl MenuManager {
         ConsoleUI::print_header("Indexer Mint Logs");
 
         let counters = indexer_mint_log_counters();
-        let (ram_shards, ram_refs, ram_unique_mints, ram_bytes) = ram_index_stats();
-        let ram_mb = (ram_bytes as f64) / 1048576.0;
-
-        let (redis_fields, redis_unique_mints, redis_bytes) =
-            match redis_index_stats(&self.redis_url).await {
-                Ok(stats) => stats,
-                Err(error) => {
-                    ConsoleUI::print_error(&format!("Failed to load Redis stats: {}", error));
-                    (0, 0, 0)
-                }
-            };
-        let redis_mb = (redis_bytes as f64) / 1048576.0;
 
         println!("  {}", "Activity Summary".bold().cyan());
         println!(
@@ -312,49 +300,15 @@ impl MenuManager {
             format!("{}", counters.other).white()
         );
 
-        println!();
-        println!("  {}", "In-Memory Index".bold().cyan());
-        println!(
-            "  {:<28}{}",
-            "Tracked shard keys:",
-            format!("{}", ram_shards).white()
-        );
-        println!(
-            "  {:<28}{}",
-            "Stored references:",
-            format!("{}", ram_refs).white()
-        );
-        println!(
-            "  {:<28}{}",
-            "Unique mints:",
-            format!("{}", ram_unique_mints).white()
-        );
-        println!("  {:<28}{:.2} MB", "Memory footprint:", ram_mb);
-
-        println!();
-        println!("  {}", "Redis Index".bold().cyan());
-        println!(
-            "  {:<28}{}",
-            "Stored shard fields:",
-            format!("{}", redis_fields).white()
-        );
-        println!(
-            "  {:<28}{}",
-            "Redis unique mints:",
-            format!("{}", redis_unique_mints).white()
-        );
-        println!("  {:<28}{:.2} MB", "Redis footprint:", redis_mb);
-
-        let recent = recent_indexer_mint_logs(5);
-        println!();
-        if recent.is_empty() {
+        if counters.total == 0 {
+            println!();
             ConsoleUI::print_info("No indexer activity recorded yet.");
-        } else {
-            println!("  {}", "Most recent indexed mints".bold().cyan());
-            for entry in recent {
-                println!("    {}", self.format_indexer_overview_entry(&entry).white());
-            }
         }
+
+        println!();
+        ConsoleUI::print_warning(
+            "Counters reflect mints indexed since the current process started running.",
+        );
 
         println!();
         ConsoleUI::print_option(1, "Live Indexer Logs");
@@ -370,30 +324,6 @@ impl MenuManager {
             "0" => self.state = MenuState::ServerLogsRoot,
             _ => {}
         }
-    }
-
-    fn format_indexer_overview_entry(&self, entry: &IndexerMintLogEntry) -> String {
-        let timestamp = entry
-            .timestamp
-            .with_timezone(&Local)
-            .format("%H:%M:%S")
-            .to_string();
-        let windows_text = if entry.windows.is_empty() {
-            "[]".to_string()
-        } else {
-            let joined = entry
-                .windows
-                .iter()
-                .map(|window| format!("\"{}\"", window))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("[{}]", joined)
-        };
-        let status = if entry.was_inserted { "" } else { " (cached)" };
-        format!(
-            "[{}] {} mint={} shards={} perf={}µs{} windows={}",
-            timestamp, entry.source, entry.mint, entry.shards, entry.perf_us, status, windows_text
-        )
     }
 
     async fn display_server_logs_user_list(&self) {

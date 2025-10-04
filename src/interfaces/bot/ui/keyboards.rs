@@ -2,7 +2,7 @@ use crate::interfaces::bot::data::{BloomWalletInfo, Task};
 use crate::interfaces::bot::ui::State;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
-const ITEMS_PER_PAGE: usize = 5;
+pub const ITEMS_PER_PAGE: usize = 5;
 
 pub fn tasks_menu_keyboard(tasks: &Vec<Task>) -> InlineKeyboardMarkup {
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();

@@ -82,8 +82,3 @@ pub fn indexer_mint_log_counters() -> IndexerMintLogCounters {
         other: OTHER_EVENTS.load(Ordering::Relaxed),
     }
 }
-
-pub fn recent_indexer_mint_logs(limit: usize) -> Vec<IndexerMintLogEntry> {
-    let guard = LOG_BUFFER.read();
-    guard.iter().rev().take(limit).cloned().collect::<Vec<_>>()
-}
