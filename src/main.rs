@@ -83,6 +83,15 @@ pub static HTTP_CLIENT: once_cell::sync::Lazy<ReqwestClient> = once_cell::sync::
 });
 
 type MyDialogue = Dialogue<State, teloxide::dispatching::dialogue::InMemStorage<State>>;
+type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+fn message_author_id(message: &Message) -> Option<u64> {
+    message.from().map(|user| user.id.0)
+}
+
+fn is_authorized_user(user_id: Option<u64>, admin_id: u64) -> bool {
+    user_id.map(|id| id == admin_id).unwrap_or(false)
+}
 
 fn setup_console_ui(
     warmer_state: WarmerState,
@@ -113,7 +122,7 @@ async fn handle_commands(
     redis_client: RedisClient,
     sol_price_state: SolPriceState,
     rpc_clients: RpcClients,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> HandlerResult {
     start(
         bot,
         dialogue,
@@ -126,6 +135,47 @@ async fn handle_commands(
     Ok(())
 }
 
+async fn forbidden_message(bot: Bot, msg: Message) -> HandlerResult {
+    let user_display = message_author_id(&msg)
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    log::warn!(
+        "Unauthorized Telegram message access attempt from user_id={} chat_id={}",
+        user_display,
+        msg.chat.id.0
+    );
+    bot.send_message(
+        msg.chat.id,
+        "🚫 Access forbidden: this bot is restricted to the administrator.",
+    )
+    .await
+    .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })?;
+    Ok(())
+}
+
+async fn forbidden_callback(bot: Bot, q: CallbackQuery) -> HandlerResult {
+    let user_display = q.from.id.0;
+    let chat_id = q.message.as_ref().map(|msg| msg.chat.id);
+    log::warn!(
+        "Unauthorized Telegram callback access attempt from user_id={}",
+        user_display
+    );
+    if let Some(chat) = chat_id {
+        bot.send_message(
+            chat,
+            "🚫 Access forbidden: this bot is restricted to the administrator.",
+        )
+        .await
+        .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })?;
+    }
+    bot.answer_callback_query(q.id)
+        .text("Access forbidden.")
+        .show_alert(true)
+        .await
+        .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     logging::init();
@@ -133,6 +183,14 @@ async fn main() {
 
     rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
         .expect("install rustls ring provider");
+
+    let admin_user_id = env::var("ADMIN_TG_ID")
+        .or_else(|_| env::var("ADMIN_TG_IG"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(7_507_740_649);
+    log::info!("Admin Telegram user id configured as {}", admin_user_id);
+    let admin_user_id = Arc::new(admin_user_id);
 
     if let Err(e) = application::filter::init_word_filter().await {
         log::error!("Failed to initialize word filter: {}", e);
@@ -253,7 +311,20 @@ async fn main() {
     let bot = Bot::from_env();
     let redis_client = RedisClient::open(redis_url).expect("Failed to create Redis client");
 
+    let unauthorized_message_handler = Update::filter_message()
+        .filter(|msg: Message, admin_user: Arc<u64>| {
+            !is_authorized_user(message_author_id(&msg), *admin_user)
+        })
+        .endpoint(forbidden_message);
+
+    let unauthorized_callback_handler = Update::filter_callback_query()
+        .filter(|q: CallbackQuery, admin_user: Arc<u64>| q.from.id.0 != *admin_user)
+        .endpoint(forbidden_callback);
+
     let dialogue_handler = Update::filter_message()
+        .filter(|msg: Message, admin_user: Arc<u64>| {
+            is_authorized_user(message_author_id(&msg), *admin_user)
+        })
         .enter_dialogue::<Message, InMemStorage<State>, State>()
         .branch(
             dptree::filter_map(|state: State| match state {
@@ -265,15 +336,21 @@ async fn main() {
         .branch(dptree::endpoint(text_handler));
 
     let command_handler = Update::filter_message()
+        .filter(|msg: Message, admin_user: Arc<u64>| {
+            is_authorized_user(message_author_id(&msg), *admin_user)
+        })
         .filter_command::<Command>()
         .enter_dialogue::<Message, InMemStorage<State>, State>()
         .endpoint(handle_commands);
 
     let callback_query_handler = Update::filter_callback_query()
+        .filter(|q: CallbackQuery, admin_user: Arc<u64>| q.from.id.0 == *admin_user)
         .enter_dialogue::<CallbackQuery, InMemStorage<State>, State>()
         .endpoint(callback_handler);
 
     let handler = dptree::entry()
+        .branch(unauthorized_message_handler)
+        .branch(unauthorized_callback_handler)
         .branch(command_handler)
         .branch(dialogue_handler)
         .branch(callback_query_handler);
@@ -284,7 +361,8 @@ async fn main() {
             redis_client,
             sol_price_state.clone(),
             user_client_handle,
-            rpc_clients
+            rpc_clients,
+            Arc::clone(&admin_user_id)
         ])
         .enable_ctrlc_handler()
         .build();

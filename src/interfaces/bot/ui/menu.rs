@@ -1,5 +1,6 @@
 use crate::application::pricing::SolPriceState;
 use crate::interfaces::bot::data::{Task, get_user_data};
+use crate::{BLOOM_WS_CONNECTION, BloomWsConnectionStatus};
 use redis::Client as RedisClient;
 
 pub fn escape_markdown(text: &str) -> String {
@@ -146,6 +147,22 @@ pub async fn generate_task_detail_text(
     let buy_amount_display = format_sol_with_usd(task.buy_amount_sol, sol_price_value);
     let buy_fee_display = format_sol_with_usd(task.buy_priority_fee_sol, sol_price_value);
 
+    let ws_status = {
+        let state = BLOOM_WS_CONNECTION.lock();
+        state.status
+    };
+
+    let bloom_notice_line = if ws_status == BloomWsConnectionStatus::Connected {
+        String::new()
+    } else {
+        format!(
+            "{}\n\n",
+            escape_markdown(
+                "⚠️ Bloom WS connection unavailable. Buy success notifications may be delayed. Please verify via @BloomSolana_bot.",
+            )
+        )
+    };
+
     format!(
         "🎯 *Task Configuration \\- {}*\n
 \
@@ -165,10 +182,7 @@ pub async fn generate_task_detail_text(
 \
         • *Buy Slippage:* `{}%`\n
 \
-        {}\
-        *🟢: The feature/mode is turned ON*
-\
-        *🔴: The feature/mode is turned OFF*",
+        {}{}",
         escape_markdown(&task.name),
         escape_markdown(platform_str),
         escape_markdown(&bloom_wallet_display),
@@ -177,7 +191,8 @@ pub async fn generate_task_detail_text(
         escape_markdown(&buy_amount_display),
         escape_markdown(&buy_fee_display),
         escape_markdown(&task.buy_slippage_percent.to_string()),
-        inform_only_line
+        inform_only_line,
+        bloom_notice_line
     )
 }
 
@@ -195,29 +210,27 @@ pub async fn generate_task_settings_text(
         "🏦 *Bloom Wallet:* `{}`",
         escape_markdown(&bloom_wallet_display)
     ));
-    if let crate::interfaces::bot::data::types::Platform::Discord = task.platform {
-        let has_token = task
-            .discord_token
-            .as_ref()
-            .map(|token| !token.trim().is_empty())
-            .unwrap_or(false);
-        let token_status = if has_token {
-            let username_display = task
-                .discord_username
-                .as_deref()
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .map(|value| format!("Configured (@{})", value))
-                .unwrap_or_else(|| "Configured".to_string());
-            username_display
-        } else {
-            "Not set".to_string()
-        };
-        sections.push(format!(
-            "🔑 *Discord Token:* `{}`",
-            escape_markdown(&token_status)
-        ));
-    }
+    let has_token = task
+        .discord_token
+        .as_ref()
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false);
+    let token_status = if has_token {
+        let username_display = task
+            .discord_username
+            .as_deref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("Configured (@{})", value))
+            .unwrap_or_else(|| "Configured".to_string());
+        username_display
+    } else {
+        "Not set".to_string()
+    };
+    sections.push(format!(
+        "🔑 *Discord Token:* `{}`",
+        escape_markdown(&token_status)
+    ));
     sections.push(escape_markdown(
         "Choose an option below to configure this task.",
     ));
