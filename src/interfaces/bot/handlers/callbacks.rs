@@ -1,7 +1,9 @@
+use grammers_client::Client as TelegramClient;
 use parking_lot::Mutex;
 use redis::Client as RedisClient;
 use std::sync::Arc;
 use teloxide::prelude::*;
+use tokio::sync::mpsc::Sender;
 
 use crate::application::pricing::SolPriceState;
 use crate::infrastructure::blockchain::RpcClients;
@@ -22,6 +24,7 @@ pub async fn callback_handler(
     sol_price_state: SolPriceState,
     user_client_handle: Arc<Mutex<Option<UserClientHandle>>>,
     rpc_clients: RpcClients,
+    client_sender: Sender<TelegramClient>,
 ) -> HandlerResult {
     if let Some(message) = q.message.clone() {
         let chat_id = message.chat.id;
@@ -48,6 +51,7 @@ pub async fn callback_handler(
                 dialogue,
                 sol_price_state.clone(),
                 user_client_handle.clone(),
+                client_sender.clone(),
             )
             .await?;
         } else if trade_actions.iter().any(|&action| data.starts_with(action)) {
@@ -59,6 +63,7 @@ pub async fn callback_handler(
                 sol_price_state,
                 user_client_handle,
                 rpc_clients,
+                client_sender,
             )
             .await?;
         } else if data == "main_menu" {

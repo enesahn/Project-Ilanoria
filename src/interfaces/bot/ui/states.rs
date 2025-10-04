@@ -36,6 +36,15 @@ pub enum State {
         selected_users: Vec<i64>,
         page: usize,
     },
+    TaskTelegramLinking {
+        task_name: String,
+        menu_message_id: MessageId,
+        qr_active: bool,
+    },
+    TaskTelegramLinkConfirm {
+        task_name: String,
+        menu_message_id: MessageId,
+    },
     TaskReceiveName {
         task_name: String,
         menu_message_id: MessageId,

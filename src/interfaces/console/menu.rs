@@ -6,24 +6,18 @@ use crate::application::indexer::{
 use crate::infrastructure::logging::suppress_stdout_logs;
 use crate::interfaces::bot::data::storage::get_user_tasks;
 use crate::interfaces::bot::tasks::subscribe_task_logs;
-use crate::interfaces::bot::user::client::{UserClientHandle, create_user_client};
 use crate::interfaces::bot::{clear_user_logs, get_all_user_ids, get_user_logs};
 use crate::interfaces::console::console::ConsoleUI;
 use crate::{BLOOM_WS_CONNECTION, BloomWsConnectionStatus};
 use chrono::{DateTime, Local, SecondsFormat};
 use colored::*;
-use parking_lot::Mutex;
 use std::io::Write as _;
-use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::select;
-use tokio::sync::mpsc;
 
 enum MenuState {
     MainMenu,
     ServerLogsRoot,
-    SettingsRoot,
-    TelegramUserMenu,
     WarmerStatus,
     IndexerLogOverview,
     ServerLogsUserList,
@@ -40,24 +34,15 @@ pub struct MenuManager {
     state: MenuState,
     warmer_state: WarmerState,
     redis_url: String,
-    user_client_handle: Arc<Mutex<Option<UserClientHandle>>>,
-    client_sender: mpsc::Sender<grammers_client::Client>,
     skip_input_cycle: bool,
 }
 
 impl MenuManager {
-    pub fn new(
-        warmer_state: WarmerState,
-        redis_url: String,
-        user_client_handle: Arc<Mutex<Option<UserClientHandle>>>,
-        client_sender: mpsc::Sender<grammers_client::Client>,
-    ) -> Self {
+    pub fn new(warmer_state: WarmerState, redis_url: String) -> Self {
         MenuManager {
             state: MenuState::MainMenu,
             warmer_state,
             redis_url,
-            user_client_handle,
-            client_sender,
             skip_input_cycle: false,
         }
     }
@@ -79,8 +64,6 @@ impl MenuManager {
         match &self.state {
             MenuState::MainMenu => self.display_main_menu(),
             MenuState::ServerLogsRoot => self.display_server_logs_root(),
-            MenuState::SettingsRoot => self.display_settings_root(),
-            MenuState::TelegramUserMenu => self.display_telegram_user_menu().await,
             MenuState::WarmerStatus => self.display_warmer_status(),
             MenuState::IndexerLogOverview => self.display_indexer_log_overview().await,
             MenuState::ServerLogsUserList => self.display_server_logs_user_list().await,
@@ -122,8 +105,6 @@ impl MenuManager {
         match self.state {
             MenuState::MainMenu => self.handle_main_menu_input(choice).await,
             MenuState::ServerLogsRoot => self.handle_server_logs_root_input(choice).await,
-            MenuState::SettingsRoot => self.handle_settings_root_input(choice).await,
-            MenuState::TelegramUserMenu => self.handle_telegram_user_menu_input(choice).await,
             MenuState::WarmerStatus => self.handle_warmer_status_input(choice),
             MenuState::IndexerLogOverview => self.handle_indexer_log_overview_input(choice).await,
             MenuState::ServerLogsUserList => self.handle_server_logs_user_list_input(choice).await,
@@ -175,9 +156,8 @@ impl MenuManager {
         }
         println!();
         ConsoleUI::print_option(1, "Server Logs");
-        ConsoleUI::print_option(2, "Settings");
-        ConsoleUI::print_option(3, "Warmer Status");
-        ConsoleUI::print_option(4, "Redis CA Index Management");
+        ConsoleUI::print_option(2, "Warmer Status");
+        ConsoleUI::print_option(3, "Redis CA Index Management");
         println!();
         ConsoleUI::print_exit_option('q', "Exit Server");
         ConsoleUI::print_refresh_hint();
@@ -206,9 +186,8 @@ impl MenuManager {
     async fn handle_main_menu_input(&mut self, input: &str) {
         match input {
             "1" => self.state = MenuState::ServerLogsRoot,
-            "2" => self.state = MenuState::SettingsRoot,
-            "3" => self.state = MenuState::WarmerStatus,
-            "4" => self.state = MenuState::RedisIndex,
+            "2" => self.state = MenuState::WarmerStatus,
+            "3" => self.state = MenuState::RedisIndex,
             "q" | "Q" => {
                 ConsoleUI::clear_screen();
                 println!(
@@ -223,121 +202,6 @@ impl MenuManager {
                     if confirm.trim().eq_ignore_ascii_case("y") {
                         self.state = MenuState::Exiting;
                         std::process::exit(0);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn display_settings_root(&self) {
-        ConsoleUI::print_header("Settings");
-        ConsoleUI::print_option(1, "Telegram API User");
-        println!();
-        ConsoleUI::print_exit_option('0', "Back to Main Menu");
-        ConsoleUI::print_refresh_hint();
-        ConsoleUI::print_prompt();
-    }
-
-    async fn handle_settings_root_input(&mut self, input: &str) {
-        match input {
-            "1" => self.state = MenuState::TelegramUserMenu,
-            "0" => self.state = MenuState::MainMenu,
-            _ => {}
-        }
-    }
-
-    async fn display_telegram_user_menu(&self) {
-        ConsoleUI::print_header("Telegram API User Management");
-
-        let handle_opt = self.user_client_handle.lock().clone();
-
-        if let Some(client) = handle_opt {
-            let mut full_name = String::from("N/A");
-            let mut username = String::from("N/A");
-
-            if let Ok(me) = client.get_me().await {
-                let first_name = me.first_name().unwrap_or("").to_string();
-                let last_name = me.last_name().map(|s| s.to_string());
-
-                full_name = match last_name {
-                    Some(last) if !last.is_empty() => format!("{} {}", first_name, last),
-                    _ => first_name,
-                };
-
-                if let Some(u) = me.username() {
-                    username = format!("@{}", u);
-                }
-            }
-
-            let status = "Logged In".bright_green().bold();
-            println!("  {} {}", "Status:".bright_white().bold(), status);
-            println!();
-            println!("  {} {}", "Name:".bright_white(), full_name.bright_cyan());
-            println!(
-                "  {} {}",
-                "Username:".bright_white(),
-                username.bright_cyan()
-            );
-            println!(
-                "  {} {}",
-                "Connected DC:".bright_white(),
-                "N/A".truecolor(150, 150, 150)
-            );
-            println!(
-                "  {} {}",
-                "IP Address:".bright_white(),
-                "N/A".truecolor(150, 150, 150)
-            );
-        } else {
-            let status = "Not Logged In".bright_red().bold();
-            println!("  {} {}", "Status:".bright_white().bold(), status);
-            println!();
-            ConsoleUI::print_info("The user client is required to fetch data from other bots");
-            println!();
-            ConsoleUI::print_option(1, "Log In / Create Session");
-        }
-
-        println!();
-        ConsoleUI::print_exit_option('0', "Back to Settings");
-        ConsoleUI::print_refresh_hint();
-        ConsoleUI::print_prompt();
-    }
-
-    async fn handle_telegram_user_menu_input(&mut self, input: &str) {
-        match input {
-            "0" => self.state = MenuState::SettingsRoot,
-            "1" => {
-                if self.user_client_handle.lock().is_some() {
-                    ConsoleUI::print_error("A user is already logged in.");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    return;
-                }
-                ConsoleUI::clear_screen();
-                ConsoleUI::print_info("Starting Telegram user login process...");
-                println!();
-                match create_user_client(self.redis_url.clone()).await {
-                    Ok((client, handle)) => {
-                        *self.user_client_handle.lock() = Some(handle);
-                        match self.client_sender.send(client).await {
-                            Ok(_) => {
-                                ConsoleUI::print_success(
-                                    "Login successful! Client is now running.",
-                                );
-                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                            }
-                            Err(e) => {
-                                ConsoleUI::print_error(&format!(
-                                    "Failed to activate client: {}",
-                                    e
-                                ));
-                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        ConsoleUI::print_error(&format!("Login failed: {}", e));
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     }
                 }
             }

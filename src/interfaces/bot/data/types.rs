@@ -46,6 +46,10 @@ pub struct Task {
     pub listen_usernames: Vec<String>,
     #[serde(default)]
     pub telegram_channel_is_broadcast: bool,
+    #[serde(default)]
+    pub grammers_session_data: Option<String>,
+    #[serde(default)]
+    pub telegram_username: Option<String>,
     pub discord_token: Option<String>,
     pub discord_channel_id: Option<String>,
     pub discord_username: Option<String>,
@@ -58,6 +62,22 @@ pub struct Task {
     pub inform_only: bool,
     #[serde(default)]
     pub bloom_wallet: Option<BloomWalletInfo>,
+}
+
+impl Task {
+    pub fn has_telegram_user_session(&self) -> bool {
+        self.grammers_session_data
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn telegram_username_display(&self) -> Option<&str> {
+        self.telegram_username
+            .as_deref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

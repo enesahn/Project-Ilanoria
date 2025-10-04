@@ -1,4 +1,4 @@
-use crate::interfaces::bot::data::{BloomWalletInfo, Platform, Task};
+use crate::interfaces::bot::data::{BloomWalletInfo, Task};
 use crate::interfaces::bot::ui::State;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
@@ -81,19 +81,25 @@ pub fn task_detail_keyboard(task: &Task) -> InlineKeyboardMarkup {
     ]);
 
     if task.platform == Platform::Telegram {
+        let has_session = task.has_telegram_user_session();
         buttons.push(vec![InlineKeyboardButton::callback(
             "👥 Telegram Users to Monitor",
             format!("task_users_{}", task.name),
         )]);
-        let has_channel = task
-            .listen_channel_name
-            .as_ref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| !task.listen_channels.is_empty());
-        let channel_button_text = if has_channel {
-            "📢 Change Channel"
+        let has_channel = has_session
+            && task
+                .listen_channel_name
+                .as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| !task.listen_channels.is_empty());
+        let channel_button_text = if has_session {
+            if has_channel {
+                "📢 Change Channel".to_string()
+            } else {
+                "📢 Set Channel".to_string()
+            }
         } else {
-            "📢 Set Channel"
+            "📢 Set Channel".to_string()
         };
         buttons.push(vec![
             InlineKeyboardButton::callback(
@@ -272,22 +278,31 @@ pub fn task_settings_keyboard(task: &Task) -> InlineKeyboardMarkup {
         "🌸 Bloom Wallets",
         format!("task_settings_wallets_{}", task.name),
     )]);
-    if matches!(task.platform, Platform::Discord) {
-        let has_token = task
-            .discord_token
-            .as_ref()
-            .map(|token| !token.trim().is_empty())
-            .unwrap_or(false);
-        let label = if has_token {
-            "🔑 Update Discord Token"
-        } else {
-            "🔑 Set Discord Token"
-        };
-        buttons.push(vec![InlineKeyboardButton::callback(
-            label,
-            format!("task_discord_token_{}", task.name),
-        )]);
-    }
+    let has_user = task.has_telegram_user_session();
+    let telegram_label = if has_user {
+        "🤖 Update Telegram User"
+    } else {
+        "🤖 Set Telegram User"
+    };
+    buttons.push(vec![InlineKeyboardButton::callback(
+        telegram_label,
+        format!("task_telegram_user_{}", task.name),
+    )]);
+
+    let has_token = task
+        .discord_token
+        .as_ref()
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false);
+    let discord_label = if has_token {
+        "🔑 Update Discord Token"
+    } else {
+        "🔑 Set Discord Token"
+    };
+    buttons.push(vec![InlineKeyboardButton::callback(
+        discord_label,
+        format!("task_discord_token_{}", task.name),
+    )]);
     buttons.push(vec![InlineKeyboardButton::callback(
         "← Back to Task",
         format!("task_detail_{}", task.name),
@@ -366,6 +381,36 @@ pub fn task_wallets_keyboard(
     )]);
 
     InlineKeyboardMarkup::new(buttons)
+}
+
+pub fn task_telegram_linking_keyboard(task_name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "🔄 Generate QR Code",
+            format!("task_telegram_link_generate_{}", task_name),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "✖️ Cancel Telegram Linking",
+            format!("task_telegram_link_cancel_{}", task_name),
+        )],
+    ])
+}
+
+pub fn task_telegram_confirm_keyboard(task_name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "✅ Yes, this is my account",
+            format!("task_telegram_link_confirm_yes_{}", task_name),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "♻️ No, try another account",
+            format!("task_telegram_link_confirm_no_{}", task_name),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "✖️ Cancel Telegram Linking",
+            format!("task_telegram_link_cancel_{}", task_name),
+        )],
+    ])
 }
 
 fn shorten_wallet_address(address: &str) -> String {

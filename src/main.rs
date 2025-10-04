@@ -93,15 +93,9 @@ fn is_authorized_user(user_id: Option<u64>, admin_id: u64) -> bool {
     user_id.map(|id| id == admin_id).unwrap_or(false)
 }
 
-fn setup_console_ui(
-    warmer_state: WarmerState,
-    redis_url: String,
-    user_client_handle: Arc<Mutex<Option<UserClientHandle>>>,
-    client_sender: mpsc::Sender<grammers_client::Client>,
-) {
+fn setup_console_ui(warmer_state: WarmerState, redis_url: String) {
     tokio::spawn(async move {
-        let mut menu_manager =
-            MenuManager::new(warmer_state, redis_url, user_client_handle, client_sender);
+        let mut menu_manager = MenuManager::new(warmer_state, redis_url);
         menu_manager.run().await;
     });
 }
@@ -227,38 +221,10 @@ async fn main() {
 
     let user_client_handle = Arc::clone(&USER_CLIENT_HANDLE);
     let (client_sender, mut client_receiver) = mpsc::channel::<grammers_client::Client>(1);
-
-    let redis_url_clone = redis_url.clone();
-    let user_client_handle_clone = Arc::clone(&USER_CLIENT_HANDLE);
-    let client_sender_clone = client_sender.clone();
-
-    tokio::spawn(async move {
-        match interfaces::bot::user::client::try_auto_login_user_client(redis_url_clone).await {
-            Ok((client, handle)) => {
-                log::info!("Telegram User Client auto-login successful. Session is active.");
-                *user_client_handle_clone.lock() = Some(handle);
-                if client_sender_clone.send(client).await.is_err() {
-                    log::error!("Failed to send auto-logged in client to its network loop task.");
-                }
-            }
-            Err(_e) => {
-                log::warn!(
-                    "Telegram User Client auto-login failed. Please log in manually via the console UI."
-                );
-            }
-        }
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let client_sender_for_dispatcher = client_sender.clone();
 
     let ui_state_clone = Arc::clone(&warmer_state);
-    let ui_handle_clone = Arc::clone(&user_client_handle);
-    setup_console_ui(
-        ui_state_clone,
-        redis_url.clone(),
-        ui_handle_clone,
-        client_sender,
-    );
+    setup_console_ui(ui_state_clone, redis_url.clone());
 
     tokio::spawn(async move {
         if let Some(user_client) = client_receiver.recv().await {
@@ -362,7 +328,8 @@ async fn main() {
             sol_price_state.clone(),
             user_client_handle,
             rpc_clients,
-            Arc::clone(&admin_user_id)
+            Arc::clone(&admin_user_id),
+            client_sender_for_dispatcher
         ])
         .enable_ctrlc_handler()
         .build();

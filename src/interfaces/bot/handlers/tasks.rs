@@ -1,19 +1,26 @@
+use crate::USER_CLIENT_HANDLE;
 use crate::application::pricing::SolPriceState;
 use crate::interfaces::bot::data::types::Platform;
-use crate::interfaces::bot::user::client::{UserClientHandle, get_chat_admins, is_channel_member};
+use crate::interfaces::bot::user::client::{
+    UserClientHandle, authenticate_task_user_via_qr, get_chat_admins, is_channel_member,
+    take_active_qr_message, take_pending_session,
+};
 use crate::interfaces::bot::utils::fetch_bloom_wallets;
 use crate::interfaces::bot::{
     State, Task, channel_selection_keyboard, generate_task_detail_text,
     generate_task_settings_text, generate_task_wallets_text, generate_tasks_text, get_user_data,
     save_user_data, send_cleanup_msg, task_delete_confirmation_keyboard, task_detail_keyboard,
-    task_settings_keyboard, task_wallets_keyboard, tasks_menu_keyboard, user_selection_keyboard,
+    task_settings_keyboard, task_telegram_linking_keyboard, task_wallets_keyboard,
+    tasks_menu_keyboard, telegram_linking_intro_text, user_selection_keyboard,
 };
+use grammers_client::Client as TelegramClient;
 use parking_lot::Mutex;
 use rand::Rng;
 use redis::Client as RedisClient;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::MessageId;
+use tokio::sync::mpsc::Sender;
 
 type MyDialogue = Dialogue<State, teloxide::dispatching::dialogue::InMemStorage<State>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -36,6 +43,7 @@ pub async fn handle_task_callbacks(
     dialogue: MyDialogue,
     sol_price_state: SolPriceState,
     user_client_handle: Arc<Mutex<Option<UserClientHandle>>>,
+    client_sender: Sender<TelegramClient>,
 ) -> HandlerResult {
     if let Some(message) = q.message.clone() {
         let chat_id = message.chat.id;
@@ -67,6 +75,8 @@ pub async fn handle_task_callbacks(
                     listen_users: vec![],
                     listen_usernames: vec![],
                     telegram_channel_is_broadcast: false,
+                    grammers_session_data: None,
+                    telegram_username: None,
                     discord_token: None,
                     discord_channel_id: None,
                     discord_username: None,
@@ -610,6 +620,260 @@ pub async fn handle_task_callbacks(
                         .await?;
                 }
             }
+        } else if let Some(task_name) = data.strip_prefix("task_telegram_user_") {
+            let task_name = task_name.to_string();
+            bot.answer_callback_query(q.id.clone()).await?;
+            let intro_text = telegram_linking_intro_text();
+            bot.edit_message_text(chat_id, message.id, intro_text)
+                .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                .reply_markup(task_telegram_linking_keyboard(&task_name))
+                .await?;
+            dialogue
+                .update(State::TaskTelegramLinking {
+                    task_name,
+                    menu_message_id: message.id,
+                    qr_active: false,
+                })
+                .await?;
+        } else if let Some(task_name) = data.strip_prefix("task_telegram_link_cancel_") {
+            let task_name = task_name.to_string();
+            bot.answer_callback_query(q.id.clone()).await?;
+
+            if let Some(qr_message_id) = take_active_qr_message(chat_id.0, &task_name) {
+                if let Err(err) = bot.delete_message(chat_id, qr_message_id).await {
+                    log::warn!(
+                        "Failed to delete active QR message during cancel chat_id={} task={} err={}",
+                        chat_id.0,
+                        task_name,
+                        err
+                    );
+                }
+            }
+
+            if let Some(pending) = take_pending_session(chat_id.0, &task_name) {
+                drop(pending);
+            }
+
+            render_task_settings_view(&bot, redis_client.clone(), chat_id, message.id, &task_name)
+                .await?;
+            dialogue
+                .update(State::TaskSettingsMenu {
+                    _task_name: task_name,
+                    _menu_message_id: message.id,
+                })
+                .await?;
+        } else if let Some(task_name) = data.strip_prefix("task_telegram_link_generate_") {
+            let task_name = task_name.to_string();
+            if let Some(state) = dialogue.get().await?.clone() {
+                if let State::TaskTelegramLinking {
+                    task_name: active_task,
+                    menu_message_id,
+                    qr_active,
+                } = state
+                {
+                    if active_task == task_name {
+                        if qr_active {
+                            bot.answer_callback_query(q.id.clone())
+                                .text(
+                                    "⚠️ A QR code is already active. Please scan it or wait for it to expire.",
+                                )
+                                .await?;
+                            let _ = send_cleanup_msg(
+                                &bot,
+                                chat_id,
+                                "⚠️ An active QR code is awaiting scan. Please scan the current code or wait for it to expire.",
+                                8,
+                            )
+                            .await;
+                            return Ok(());
+                        }
+
+                        dialogue
+                            .update(State::TaskTelegramLinking {
+                                task_name: active_task.clone(),
+                                menu_message_id,
+                                qr_active: true,
+                            })
+                            .await?;
+
+                        bot.answer_callback_query(q.id.clone())
+                            .text("Generating QR code...")
+                            .await?;
+
+                        let bot_clone = bot.clone();
+                        let redis_clone = redis_client.clone();
+                        let dialogue_clone = dialogue.clone();
+                        let chat_id_value = chat_id.0;
+                        let task_name_for_state = task_name.clone();
+                        let menu_message_id_value = menu_message_id;
+                        tokio::spawn(async move {
+                            if let Err(err) = authenticate_task_user_via_qr(
+                                bot_clone.clone(),
+                                redis_clone,
+                                chat_id_value,
+                                task_name.clone(),
+                                menu_message_id_value,
+                                dialogue_clone.clone(),
+                            )
+                            .await
+                            {
+                                log::error!(
+                                    "Failed to complete QR login chat_id={} task={} err={}",
+                                    chat_id_value,
+                                    task_name,
+                                    err
+                                );
+                                take_active_qr_message(chat_id_value, &task_name_for_state);
+                                if let Err(update_err) = dialogue_clone
+                                    .update(State::TaskTelegramLinking {
+                                        task_name: task_name_for_state,
+                                        menu_message_id: menu_message_id_value,
+                                        qr_active: false,
+                                    })
+                                    .await
+                                {
+                                    log::error!(
+                                        "Failed to reset Telegram linking state chat_id={} err={}",
+                                        chat_id_value,
+                                        update_err
+                                    );
+                                }
+                                let error_text =
+                                    format!("⚠️ Telegram QR session failed to start: {}", err);
+                                let _ = send_cleanup_msg(
+                                    &bot_clone,
+                                    ChatId(chat_id_value),
+                                    &error_text,
+                                    8,
+                                )
+                                .await;
+                            }
+                        });
+                    } else {
+                        bot.answer_callback_query(q.id.clone()).await?;
+                    }
+                } else {
+                    bot.answer_callback_query(q.id.clone()).await?;
+                }
+            } else {
+                bot.answer_callback_query(q.id.clone()).await?;
+            }
+        } else if let Some(task_name) = data.strip_prefix("task_telegram_link_confirm_yes_") {
+            let task_name = task_name.to_string();
+            bot.answer_callback_query(q.id.clone()).await?;
+
+            if let Some(state) = dialogue.get().await?.clone() {
+                if let State::TaskTelegramLinkConfirm {
+                    task_name: active_task,
+                    menu_message_id,
+                } = state
+                {
+                    if active_task == task_name {
+                        if let Some(pending) = take_pending_session(chat_id.0, &task_name) {
+                            take_active_qr_message(chat_id.0, &task_name);
+
+                            let mut con = redis_client.get_multiplexed_async_connection().await?;
+                            if let Some(mut user_data) = get_user_data(&mut con, chat_id.0).await? {
+                                if let Some(task) =
+                                    user_data.tasks.iter_mut().find(|t| t.name == task_name)
+                                {
+                                    task.grammers_session_data =
+                                        Some(pending.encoded_session.clone());
+                                    task.telegram_username = pending.display_name.clone();
+                                    save_user_data(&mut con, chat_id.0, &user_data).await?;
+                                }
+                            }
+
+                            *USER_CLIENT_HANDLE.lock() = Some(pending.client.clone());
+                            if let Err(err) = client_sender.send(pending.client.clone()).await {
+                                log::warn!(
+                                    "Unable to hand over Telegram client to background loop: {}",
+                                    err
+                                );
+                            }
+
+                            render_task_settings_view(
+                                &bot,
+                                redis_client.clone(),
+                                chat_id,
+                                menu_message_id,
+                                &task_name,
+                            )
+                            .await?;
+                            dialogue
+                                .update(State::TaskSettingsMenu {
+                                    _task_name: task_name.clone(),
+                                    _menu_message_id: menu_message_id,
+                                })
+                                .await?;
+
+                            let success_text = match pending.display_name {
+                                Some(name) => format!("✅ Telegram session linked: {}", name),
+                                None => "✅ Telegram session successfully linked.".to_string(),
+                            };
+                            let _ = send_cleanup_msg(&bot, chat_id, &success_text, 8).await;
+                        } else {
+                            take_active_qr_message(chat_id.0, &task_name);
+                            let intro_text = telegram_linking_intro_text();
+                            bot.edit_message_text(chat_id, menu_message_id, intro_text)
+                                .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                                .reply_markup(task_telegram_linking_keyboard(&task_name))
+                                .await?;
+                            dialogue
+                                .update(State::TaskTelegramLinking {
+                                    task_name,
+                                    menu_message_id,
+                                    qr_active: false,
+                                })
+                                .await?;
+                            let _ = send_cleanup_msg(
+                                &bot,
+                                chat_id,
+                                "⚠️ No pending Telegram session found. Please generate a new QR code.",
+                                6,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        } else if let Some(task_name) = data.strip_prefix("task_telegram_link_confirm_no_") {
+            let task_name = task_name.to_string();
+            bot.answer_callback_query(q.id.clone()).await?;
+
+            if let Some(state) = dialogue.get().await?.clone() {
+                if let State::TaskTelegramLinkConfirm {
+                    task_name: active_task,
+                    menu_message_id,
+                } = state
+                {
+                    if active_task == task_name {
+                        if let Some(pending) = take_pending_session(chat_id.0, &task_name) {
+                            drop(pending);
+                        }
+                        take_active_qr_message(chat_id.0, &task_name);
+                        let intro_text = telegram_linking_intro_text();
+                        bot.edit_message_text(chat_id, menu_message_id, intro_text)
+                            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                            .reply_markup(task_telegram_linking_keyboard(&task_name))
+                            .await?;
+                        dialogue
+                            .update(State::TaskTelegramLinking {
+                                task_name,
+                                menu_message_id,
+                                qr_active: false,
+                            })
+                            .await?;
+                        let _ = send_cleanup_msg(
+                            &bot,
+                            chat_id,
+                            "ℹ️ Please generate a new QR code to try a different account.",
+                            6,
+                        )
+                        .await;
+                    }
+                }
+            }
         } else if let Some(task_name) = data.strip_prefix("task_discord_token_") {
             let prompt = bot
                 .send_message(chat_id, "Please enter your Discord user token:")
@@ -660,6 +924,17 @@ pub async fn handle_task_callbacks(
             let task_name = data.strip_prefix("task_channels_").unwrap().to_string();
             if let Some(task) = get_task_by_name(redis_client.clone(), chat_id.0, &task_name).await
             {
+                if !task.has_telegram_user_session() {
+                    bot.answer_callback_query(q.id.clone()).await?;
+                    let _ = send_cleanup_msg(
+                        &bot,
+                        chat_id,
+                        "⚠️ Telegram user client is not logged in. Please link a Telegram user before changing the channel.",
+                        5,
+                    )
+                    .await;
+                    return Ok(());
+                }
                 if task.active {
                     bot.answer_callback_query(q.id.clone()).await?;
                     let _ = send_cleanup_msg(
@@ -687,6 +962,17 @@ pub async fn handle_task_callbacks(
             let mut con = redis_client.get_multiplexed_async_connection().await?;
             if let Some(user_data) = get_user_data(&mut con, chat_id.0).await? {
                 if let Some(task) = user_data.tasks.iter().find(|t| t.name == task_name) {
+                    if !task.has_telegram_user_session() {
+                        bot.answer_callback_query(q.id.clone()).await?;
+                        let _ = send_cleanup_msg(
+                            &bot,
+                            chat_id,
+                            "⚠️ Telegram user client is not logged in. Please link a Telegram user before managing monitored users.",
+                            5,
+                        )
+                        .await;
+                        return Ok(());
+                    }
                     if task.listen_channels.is_empty() {
                         let _ =
                             send_cleanup_msg(&bot, chat_id, "Please set a channel first.", 5).await;
@@ -1126,6 +1412,16 @@ fn activation_requirement_error(task: &Task) -> Option<&'static str> {
 
     match task.platform {
         Platform::Telegram => {
+            let has_session = task
+                .grammers_session_data
+                .as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            if !has_session {
+                return Some(
+                    "❌ Telegram user session is not configured. Link a Telegram user via the QR login flow before activating this task.",
+                );
+            }
             if task.listen_channels.is_empty() {
                 return Some("❌ Please set a Telegram channel ID before activating this task.");
             }

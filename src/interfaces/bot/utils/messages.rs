@@ -1,3 +1,4 @@
+use crate::interfaces::bot::escape_markdown;
 use teloxide::prelude::*;
 use tokio::time::{Duration, sleep};
 
@@ -7,7 +8,11 @@ pub async fn send_cleanup_msg(
     text: &str,
     seconds: u64,
 ) -> Result<(), teloxide::RequestError> {
-    let sent = bot.send_message(chat_id, text).await?;
+    let sanitized = escape_markdown(text);
+    let sent = bot
+        .send_message(chat_id, sanitized)
+        .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+        .await?;
     let bot_clone = bot.clone();
     let chat_id_clone = chat_id;
     let message_id = sent.id;

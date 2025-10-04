@@ -1,7 +1,9 @@
+use grammers_client::Client as TelegramClient;
 use parking_lot::Mutex;
 use redis::Client as RedisClient;
 use std::sync::Arc;
 use teloxide::prelude::*;
+use tokio::sync::mpsc::Sender;
 
 use super::text::{format_token_info_message, get_parsed_token_info, parse_mint_from_text_robust};
 use crate::application::pricing::SolPriceState;
@@ -20,6 +22,7 @@ pub async fn handle_trade_callback(
     sol_price_state: SolPriceState,
     user_client_handle: Arc<Mutex<Option<UserClientHandle>>>,
     rpc_clients: RpcClients,
+    _client_sender: Sender<TelegramClient>,
 ) -> HandlerResult {
     if let Some(message) = q.message.clone() {
         let chat_id = message.chat.id;

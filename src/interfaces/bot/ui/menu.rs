@@ -4,7 +4,8 @@ use crate::{BLOOM_WS_CONNECTION, BloomWsConnectionStatus};
 use redis::Client as RedisClient;
 
 pub fn escape_markdown(text: &str) -> String {
-    text.replace("_", "\\_")
+    text.replace("\\", "\\\\")
+        .replace("_", "\\_")
         .replace("*", "\\*")
         .replace("[", "\\[")
         .replace("]", "\\]")
@@ -22,6 +23,38 @@ pub fn escape_markdown(text: &str) -> String {
         .replace("}", "\\}")
         .replace(".", "\\.")
         .replace("!", "\\!")
+}
+
+pub fn telegram_linking_intro_text() -> String {
+    let path = escape_markdown("Telegram App > Settings > Devices > Link Desktop Device");
+    [
+        "📱 *Telegram User Linking*".to_string(),
+        format!(r"You need to scan this QR code in the {}\.", path),
+        r"⏳ The QR code is valid for *60 seconds*\. After that it expires\.".to_string(),
+        r"Tap *Generate QR Code* when you are ready\.".to_string(),
+    ]
+    .join("\n\n")
+}
+
+pub fn telegram_linking_scan_text() -> String {
+    let path = escape_markdown("Telegram App > Settings > Devices > Link Desktop Device");
+    [
+        "🕒 *Scan within 60 seconds*".to_string(),
+        format!(
+            r"Open the {} and scan the QR code that was just sent\.",
+            path
+        ),
+        r"If it expires you can tap *Generate QR Code* again\.".to_string(),
+    ]
+    .join("\n\n")
+}
+
+pub fn telegram_linking_expired_text() -> String {
+    [
+        "⚠️ *QR code expired*".to_string(),
+        r"Generate a new QR code when you are ready to try again\.".to_string(),
+    ]
+    .join("\n\n")
 }
 
 pub async fn generate_tasks_text(redis_client: RedisClient, chat_id: i64) -> String {
@@ -72,46 +105,51 @@ pub async fn generate_task_detail_text(
 
     let platform_details = match task.platform {
         Platform::Telegram => {
-            let channel_name_str = task
-                .listen_channel_name
-                .as_deref()
-                .and_then(|name| {
-                    let trimmed = name.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed)
-                    }
-                })
-                .unwrap_or("Not Set");
-            let monitoring_str = if task.listen_users.is_empty() && task.listen_usernames.is_empty()
-            {
-                if task.telegram_channel_is_broadcast {
-                    "Channel posts (no specific users)".to_string()
-                } else {
-                    "Not Set".to_string()
-                }
-            } else if !task.listen_usernames.is_empty() {
-                format!(
-                    "{} users: {}",
-                    task.listen_usernames.len(),
-                    task.listen_usernames.join(", ")
-                )
+            let has_user_session = task.has_telegram_user_session();
+            let channel_name_str = if has_user_session {
+                task.listen_channel_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "Not Set".to_string())
             } else {
-                let users = task
-                    .listen_users
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{} users: {}", task.listen_users.len(), users)
+                "Not Set".to_string()
             };
+            let monitoring_str = if has_user_session {
+                if task.listen_users.is_empty() && task.listen_usernames.is_empty() {
+                    if task.telegram_channel_is_broadcast {
+                        "Channel posts (no specific users)".to_string()
+                    } else {
+                        "Not Set".to_string()
+                    }
+                } else if !task.listen_usernames.is_empty() {
+                    format!(
+                        "{} users: {}",
+                        task.listen_usernames.len(),
+                        task.listen_usernames.join(", ")
+                    )
+                } else {
+                    let users = task
+                        .listen_users
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{} users: {}", task.listen_users.len(), users)
+                }
+            } else {
+                "Not Set".to_string()
+            };
+            let username_display = task.telegram_username_display().unwrap_or("N/A");
             format!(
                 concat!(
-                    "📌 *Telegram Channel Name:* `{}`\n",
+                    "👤 *Telegram Username:* `{}`\n",
+                    "📢 *Telegram Channel Name:* `{}`\n",
                     "👥 *Monitoring:* `{}`"
                 ),
-                escape_markdown(channel_name_str),
+                escape_markdown(username_display),
+                escape_markdown(&channel_name_str),
                 escape_markdown(&monitoring_str)
             )
         }
@@ -209,6 +247,18 @@ pub async fn generate_task_settings_text(
     sections.push(format!(
         "🏦 *Bloom Wallet:* `{}`",
         escape_markdown(&bloom_wallet_display)
+    ));
+    let has_telegram_session = task.has_telegram_user_session();
+    let telegram_status = if has_telegram_session {
+        task.telegram_username_display()
+            .map(|value| format!("Configured {}", value))
+            .unwrap_or_else(|| "Configured".to_string())
+    } else {
+        "Not set".to_string()
+    };
+    sections.push(format!(
+        "🤖 *Telegram User:* `{}`",
+        escape_markdown(&telegram_status)
     ));
     let has_token = task
         .discord_token

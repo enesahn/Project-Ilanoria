@@ -1,144 +1,385 @@
-use crate::{PENDING_BLOOM_INFO, USER_CLIENT_HANDLE};
-use anyhow::{Result, anyhow};
+use crate::PENDING_BLOOM_INFO;
+use crate::interfaces::bot::State;
+use crate::interfaces::bot::data::get_user_data;
+use crate::interfaces::bot::ui::menu::escape_markdown;
+use crate::interfaces::bot::{
+    task_telegram_confirm_keyboard, task_telegram_linking_keyboard, telegram_linking_expired_text,
+    telegram_linking_scan_text,
+};
+use anyhow::{Context, Result, anyhow};
+use base64::Engine;
+use base64::engine::general_purpose::{
+    STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD,
+};
 use grammers_client::types::participant::Role;
 use grammers_client::types::{Chat, User};
-use grammers_client::{Client, Config, InitParams, SignInError};
+use grammers_client::{Client, Config, InitParams, InvocationError};
 use grammers_session::Session;
-use redis::Commands;
+use grammers_tl_types as tl;
+use image::{DynamicImage, ImageOutputFormat, Luma};
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
+use qrcode::QrCode;
+use redis::Client as RedisClient;
+use std::collections::HashMap;
 use std::env;
-use std::io::{self, Write};
-use std::time::Duration;
+use std::io::Cursor;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use teloxide::dispatching::dialogue::{Dialogue, InMemStorage};
+use teloxide::prelude::*;
+use teloxide::types::{ChatId, InputFile, MessageId, ParseMode};
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 pub type UserClientHandle = grammers_client::Client;
 
-const SESSION_KEY: &str = "grammers_session_data";
+pub static ACTIVE_QR_MESSAGES: Lazy<Arc<Mutex<HashMap<(i64, String), MessageId>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-fn get_redis_connection(redis_url: &str) -> Result<redis::Connection> {
-    let client = redis::Client::open(redis_url)?;
-    Ok(client.get_connection()?)
+pub fn set_active_qr_message(chat_id: i64, task_name: &str, message_id: MessageId) {
+    ACTIVE_QR_MESSAGES
+        .lock()
+        .insert((chat_id, task_name.to_string()), message_id);
 }
 
-fn load_or_create_session(redis_url: &str) -> Result<Session> {
-    let mut conn = get_redis_connection(redis_url)?;
-    let data: Option<Vec<u8>> = conn.get(SESSION_KEY)?;
-
-    if let Some(session_data) = data {
-        log::info!("Loading Grammers session from Redis...");
-        Ok(Session::load(&session_data)?)
-    } else {
-        log::info!("No Grammers session found in Redis, creating a new one.");
-        Ok(Session::new())
-    }
+pub fn take_active_qr_message(chat_id: i64, task_name: &str) -> Option<MessageId> {
+    ACTIVE_QR_MESSAGES
+        .lock()
+        .remove(&(chat_id, task_name.to_string()))
 }
 
-fn save_session(session: &Session, redis_url: &str) -> Result<()> {
-    log::info!("Saving Grammers session to Redis...");
-    let mut conn = get_redis_connection(redis_url)?;
-    let data = session.save();
-    let _: () = conn.set(SESSION_KEY, data)?;
-    Ok(())
+pub struct PendingTelegramSession {
+    pub client: Client,
+    pub encoded_session: String,
+    pub display_name: Option<String>,
 }
 
-async fn get_stdin_line() -> Result<String> {
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    Ok(line.trim().to_string())
+pub static PENDING_QR_SESSIONS: Lazy<Arc<Mutex<HashMap<(i64, String), PendingTelegramSession>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+pub fn store_pending_session(
+    chat_id: i64,
+    task_name: &str,
+    session: PendingTelegramSession,
+) -> Option<PendingTelegramSession> {
+    PENDING_QR_SESSIONS
+        .lock()
+        .insert((chat_id, task_name.to_string()), session)
 }
 
-pub async fn try_auto_login_user_client(redis_url: String) -> Result<(Client, UserClientHandle)> {
-    let session = load_or_create_session(&redis_url)?;
-
-    let api_id = env::var("API_ID")
-        .expect("API_ID must be set in .env file")
-        .parse()?;
-    let api_hash = env::var("API_HASH").expect("API_HASH must be set in .env file");
-
-    let params = InitParams {
-        device_model: "PC".to_string(),
-        system_version: "Windows 11".to_string(),
-        app_version: "Telegram Desktop 4.16.8".to_string(),
-        lang_code: "en".to_string(),
-        system_lang_code: "en".to_string(),
-        ..Default::default()
-    };
-
-    let client = Client::connect(Config {
-        session,
-        api_id,
-        api_hash: api_hash.clone(),
-        params,
-    })
-    .await?;
-
-    if !client.is_authorized().await? {
-        return Err(anyhow!("Session is not authorized. Manual login required."));
-    }
-
-    let handle = client.clone();
-    *USER_CLIENT_HANDLE.lock() = Some(handle.clone());
-    Ok((client, handle))
+pub fn take_pending_session(chat_id: i64, task_name: &str) -> Option<PendingTelegramSession> {
+    PENDING_QR_SESSIONS
+        .lock()
+        .remove(&(chat_id, task_name.to_string()))
 }
 
-pub async fn create_user_client(redis_url: String) -> Result<(Client, UserClientHandle)> {
-    let session = load_or_create_session(&redis_url)?;
+pub fn encode_session(session: &Session) -> String {
+    let bytes = session.save();
+    BASE64_STANDARD.encode(bytes)
+}
 
-    let api_id = env::var("API_ID")
-        .expect("API_ID must be set in .env file")
-        .parse()?;
-    let api_hash = env::var("API_HASH").expect("API_HASH must be set in .env file");
+fn build_qr_png(data: &str) -> Result<Vec<u8>> {
+    let code =
+        QrCode::new(data.as_bytes()).map_err(|err| anyhow!("Failed to create QR code: {}", err))?;
+    let image = code
+        .render::<Luma<u8>>()
+        .min_dimensions(160, 160)
+        .max_dimensions(160, 160)
+        .build();
+    let mut buffer = Cursor::new(Vec::new());
+    DynamicImage::ImageLuma8(image)
+        .write_to(&mut buffer, ImageOutputFormat::Png)
+        .map_err(|err| anyhow!("Failed to encode QR PNG: {}", err))?;
+    Ok(buffer.into_inner())
+}
 
-    let params = InitParams {
-        device_model: "PC".to_string(),
-        system_version: "Windows 11".to_string(),
-        app_version: "Telegram Desktop 4.16.8".to_string(),
-        lang_code: "en".to_string(),
-        system_lang_code: "en".to_string(),
-        ..Default::default()
-    };
-
-    let client = Client::connect(Config {
-        session,
-        api_id,
-        api_hash: api_hash.clone(),
-        params,
-    })
-    .await?;
-
-    let handle = client.clone();
-    *USER_CLIENT_HANDLE.lock() = Some(handle.clone());
-
-    if !client.is_authorized().await? {
-        let phone = {
-            print!("Enter your phone number (e.g., +1234567890): ");
-            io::stdout().flush().unwrap();
-            get_stdin_line().await?
-        };
-        let token = client.request_login_code(&phone).await?;
-
-        let code = {
-            print!("Enter the login code you received: ");
-            io::stdout().flush().unwrap();
-            get_stdin_line().await?
-        };
-
-        let signed_in = client.sign_in(&token, &code).await;
-        match signed_in {
-            Err(SignInError::PasswordRequired(password_token)) => {
-                let password = {
-                    print!("Enter your 2FA password: ");
-                    io::stdout().flush().unwrap();
-                    get_stdin_line().await?
-                };
-                client.check_password(password_token, password).await?;
-            }
-            Ok(_) => (),
-            Err(e) => return Err(e.into()),
+fn format_telegram_display_name(user: &grammers_client::types::User) -> Option<String> {
+    if let Some(username) = user.username() {
+        if username.trim().is_empty() {
+            None
+        } else {
+            Some(format!("@{}", username.trim()))
         }
-        save_session(&client.session(), &redis_url)?;
+    } else {
+        let first = user.first_name().unwrap_or("").trim().to_string();
+        let last = user.last_name().unwrap_or("").trim().to_string();
+        let combined = match (first.is_empty(), last.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => first,
+            (true, false) => last,
+            (false, false) => format!("{} {}", first, last),
+        };
+        if combined.trim().is_empty() {
+            None
+        } else {
+            Some(combined)
+        }
+    }
+}
+
+enum LoginSignalOutcome {
+    TokenUpdated,
+    TimedOut,
+}
+
+async fn wait_for_login_signal(
+    client: &Client,
+    max_wait: Duration,
+) -> Result<LoginSignalOutcome, InvocationError> {
+    let mut remaining = max_wait;
+    while remaining > Duration::ZERO {
+        let start = Instant::now();
+        match timeout(remaining, client.next_raw_update()).await {
+            Ok(Ok((update, _, _))) => {
+                if matches!(update, tl::enums::Update::LoginToken) {
+                    return Ok(LoginSignalOutcome::TokenUpdated);
+                }
+                let elapsed = start.elapsed();
+                remaining = remaining.saturating_sub(elapsed);
+            }
+            Ok(Err(err)) => return Err(err),
+            Err(_) => return Ok(LoginSignalOutcome::TimedOut),
+        }
+    }
+    Ok(LoginSignalOutcome::TimedOut)
+}
+
+pub async fn authenticate_task_user_via_qr(
+    bot: Bot,
+    redis_client: RedisClient,
+    chat_id: i64,
+    task_name: String,
+    menu_message_id: MessageId,
+    dialogue: Dialogue<State, InMemStorage<State>>,
+) -> Result<()> {
+    let mut con = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .context("Failed to connect to Redis")?;
+    let user_data = get_user_data(&mut con, chat_id)
+        .await
+        .context("Failed to load user data")?
+        .ok_or_else(|| anyhow!("No user data found for chat {}", chat_id))?;
+    drop(con);
+
+    if !user_data.tasks.iter().any(|task| task.name == task_name) {
+        return Err(anyhow!(
+            "Task '{}' not found while preparing QR authentication",
+            task_name
+        ));
     }
 
-    Ok((client, handle))
+    let session = Session::new();
+    let api_id = env::var("API_ID")
+        .context("API_ID environment variable missing")?
+        .parse()
+        .context("API_ID must be a valid integer")?;
+    let api_hash = env::var("API_HASH").context("API_HASH environment variable missing")?;
+
+    let params = InitParams {
+        device_model: "PC".to_string(),
+        system_version: "Windows 11".to_string(),
+        app_version: "Telegram Desktop 4.16.8".to_string(),
+        lang_code: "en".to_string(),
+        system_lang_code: "en".to_string(),
+        ..Default::default()
+    };
+
+    let client = Client::connect(Config {
+        session,
+        api_id,
+        api_hash: api_hash.clone(),
+        params,
+    })
+    .await
+    .context("Failed to connect Telegram client for QR login")?;
+
+    let chat = ChatId(chat_id);
+    let mut qr_message_id: Option<MessageId> = None;
+    let mut last_token: Option<Vec<u8>> = None;
+
+    take_active_qr_message(chat_id, &task_name);
+
+    loop {
+        let mut response = client
+            .export_login_token_raw(&[])
+            .await
+            .context("Failed to export Telegram login token")?;
+
+        loop {
+            match response {
+                tl::enums::auth::LoginToken::Token(ref token_payload) => {
+                    let display_timeout = token_payload.expires.clamp(5, 60);
+                    let should_refresh = last_token
+                        .as_ref()
+                        .map(|previous| previous != &token_payload.token)
+                        .unwrap_or(true);
+
+                    if should_refresh {
+                        let tg_url = format!(
+                            "tg://login?token={}",
+                            BASE64_URL_SAFE_NO_PAD.encode(&token_payload.token)
+                        );
+                        let png_bytes = build_qr_png(&tg_url)?;
+
+                        if let Some(existing) = qr_message_id.take() {
+                            let _ = bot.delete_message(chat, existing).await;
+                            take_active_qr_message(chat_id, &task_name);
+                        }
+
+                        let sent = bot
+                            .send_photo(
+                                chat,
+                                InputFile::memory(png_bytes).file_name("telegram-login.png"),
+                            )
+                            .await?;
+                        set_active_qr_message(chat_id, &task_name, sent.id);
+                        qr_message_id = Some(sent.id);
+                        last_token = Some(token_payload.token.clone());
+                        let status_text = telegram_linking_scan_text();
+                        bot.edit_message_text(chat, menu_message_id, status_text)
+                            .parse_mode(ParseMode::MarkdownV2)
+                            .reply_markup(task_telegram_linking_keyboard(&task_name))
+                            .await?;
+                    }
+
+                    let wait_outcome =
+                        wait_for_login_signal(&client, Duration::from_secs(display_timeout as u64))
+                            .await
+                            .map_err(|err| {
+                                anyhow!(
+                                    "Failed while waiting for Telegram login confirmation: {}",
+                                    err
+                                )
+                            })?;
+
+                    if matches!(wait_outcome, LoginSignalOutcome::TimedOut) {
+                        if let Some(existing) = qr_message_id.take() {
+                            let _ = bot.delete_message(chat, existing).await;
+                            take_active_qr_message(chat_id, &task_name);
+                        }
+                        let expired_text = telegram_linking_expired_text();
+                        let edit_result = bot
+                            .edit_message_text(chat, menu_message_id, expired_text)
+                            .parse_mode(ParseMode::MarkdownV2)
+                            .reply_markup(task_telegram_linking_keyboard(&task_name))
+                            .await;
+                        if let Err(err) = edit_result {
+                            if !matches!(
+                                err,
+                                teloxide::RequestError::Api(teloxide::ApiError::MessageNotModified)
+                            ) {
+                                return Err(err.into());
+                            }
+                        }
+                        take_active_qr_message(chat_id, &task_name);
+                        return Ok(());
+                    }
+
+                    break;
+                }
+                tl::enums::auth::LoginToken::MigrateTo(migrate) => {
+                    client
+                        .switch_to_dc(migrate.dc_id)
+                        .await
+                        .context("Failed to switch Telegram datacenter for QR login")?;
+                    response = client
+                        .import_login_token_raw(&migrate.token)
+                        .await
+                        .context("Failed to import Telegram login token in target datacenter")?;
+                }
+                tl::enums::auth::LoginToken::Success(success) => {
+                    if let Some(existing) = qr_message_id.take() {
+                        let _ = bot.delete_message(chat, existing).await;
+                    }
+
+                    let auth_payload = match success.authorization {
+                        tl::enums::auth::Authorization::Authorization(inner) => inner,
+                        other => {
+                            return Err(anyhow!(
+                                "Unexpected authorization variant during QR login: {:?}",
+                                other
+                            ));
+                        }
+                    };
+
+                    let user = client
+                        .apply_authorization(auth_payload)
+                        .await
+                        .context("Failed to apply Telegram authorization")?;
+                    let encoded_session = encode_session(&client.session());
+                    let display_name = format_telegram_display_name(&user);
+                    let username = user.username().map(|value| format!("@{}", value));
+                    let user_id = user.id();
+
+                    if let Some(previous) = store_pending_session(
+                        chat_id,
+                        &task_name,
+                        PendingTelegramSession {
+                            client: client.clone(),
+                            encoded_session,
+                            display_name: display_name.clone(),
+                        },
+                    ) {
+                        drop(previous);
+                    }
+
+                    take_active_qr_message(chat_id, &task_name);
+
+                    let mut lines = Vec::new();
+                    lines.push(r"✅ *QR code scanned\!*".to_string());
+                    lines.push(String::new());
+                    lines.push(escape_markdown(
+                        "Please confirm the Telegram account before linking.",
+                    ));
+
+                    let mut account_details = Vec::new();
+                    if let Some(name) = display_name.as_ref() {
+                        account_details.push(format!("• Name: *{}*", escape_markdown(name)));
+                    }
+                    if let Some(user_name) = username.as_ref() {
+                        account_details
+                            .push(format!("• Username: *{}*", escape_markdown(user_name)));
+                    }
+                    let escaped_id = escape_markdown(&user_id.to_string());
+                    account_details.push(format!("• User ID: `{}`", escaped_id));
+
+                    lines.extend(account_details);
+                    lines.push(String::new());
+                    lines.push(escape_markdown(
+                        "Select an option below to continue with the linking process.",
+                    ));
+
+                    let confirm_text = lines.join("\n");
+
+                    let edit_result = bot
+                        .edit_message_text(chat, menu_message_id, confirm_text)
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .reply_markup(task_telegram_confirm_keyboard(&task_name))
+                        .await;
+
+                    if let Err(err) = edit_result {
+                        if !matches!(
+                            err,
+                            teloxide::RequestError::Api(teloxide::ApiError::MessageNotModified)
+                        ) {
+                            return Err(err.into());
+                        }
+                    }
+
+                    let _ = dialogue
+                        .update(State::TaskTelegramLinkConfirm {
+                            task_name,
+                            menu_message_id,
+                        })
+                        .await;
+
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 pub async fn get_token_info_from_bloom(client: &UserClientHandle, mint: &str) -> Result<String> {
