@@ -81,7 +81,7 @@ smallvec = "1.15.1"
 parking_lot = "0.12"
 arc-swap = "1.7"
 sha2 = "0.10"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "url"] }
 url = "2.5.2"
 
 [patch."https://github.com/Lonami/grammers"]

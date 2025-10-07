@@ -3,23 +3,31 @@ use crate::{
     BloomWsConnectionStatus, PENDING_BLOOM_RESPONSES,
 };
 use anyhow::Result;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use futures_util::{SinkExt, StreamExt};
-use rand::RngCore;
 use serde::Deserialize;
 use std::convert::TryFrom;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::http::Request;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue, Request, header};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use url::Url;
 
 const BLOOM_WS_HOST: &str = "ws.bloom-ext.app";
 const BLOOM_EXTENSION_ORIGIN: &str = "chrome-extension://akdiolpnpplhaoedmednpobkhmkophmg";
 const BLOOM_WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0";
+const BLOOM_WS_ACCEPT_ENCODING: &str = "gzip, deflate, br, zstd";
+const BLOOM_WS_ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9";
+const BLOOM_WS_SEC_CH_UA: &str =
+    "\"Not;A=Brand\";v=\"99\", \"Microsoft Edge\";v=\"140\", \"Chromium\";v=\"140\"";
+const BLOOM_WS_SEC_CH_UA_MOBILE: &str = "?0";
+const BLOOM_WS_SEC_CH_UA_PLATFORM: &str = "\"Windows\"";
+const BLOOM_WS_SEC_FETCH_SITE: &str = "none";
+const BLOOM_WS_SEC_FETCH_MODE: &str = "websocket";
+const BLOOM_WS_SEC_FETCH_DEST: &str = "empty";
+const BLOOM_WS_SEC_WEBSOCKET_EXTENSIONS: &str = "permessage-deflate; client_max_window_bits";
 
 enum ConnectOutcome {
     SessionClosed { reason: String },
@@ -133,6 +141,65 @@ fn normalize_reason(reason: &str) -> String {
     text.to_string()
 }
 
+fn build_bloom_ws_request(url: Url) -> Result<Request<()>> {
+    let mut request = url.into_client_request()?;
+    let headers = request.headers_mut();
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static(BLOOM_EXTENSION_ORIGIN),
+    );
+    headers.insert(
+        header::USER_AGENT,
+        HeaderValue::from_static(BLOOM_WS_USER_AGENT),
+    );
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+    headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+    headers.insert(
+        HeaderName::from_static("sec-websocket-version"),
+        HeaderValue::from_static("13"),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-websocket-extensions"),
+        HeaderValue::from_static(BLOOM_WS_SEC_WEBSOCKET_EXTENSIONS),
+    );
+    headers.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static(BLOOM_WS_ACCEPT_ENCODING),
+    );
+    headers.insert(
+        header::ACCEPT_LANGUAGE,
+        HeaderValue::from_static(BLOOM_WS_ACCEPT_LANGUAGE),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-fetch-site"),
+        HeaderValue::from_static(BLOOM_WS_SEC_FETCH_SITE),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-fetch-mode"),
+        HeaderValue::from_static(BLOOM_WS_SEC_FETCH_MODE),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-fetch-dest"),
+        HeaderValue::from_static(BLOOM_WS_SEC_FETCH_DEST),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-ch-ua"),
+        HeaderValue::from_static(BLOOM_WS_SEC_CH_UA),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-ch-ua-mobile"),
+        HeaderValue::from_static(BLOOM_WS_SEC_CH_UA_MOBILE),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-ch-ua-platform"),
+        HeaderValue::from_static(BLOOM_WS_SEC_CH_UA_PLATFORM),
+    );
+    headers.insert(header::HOST, HeaderValue::from_static(BLOOM_WS_HOST));
+    Ok(request)
+}
+
 async fn connect_once() -> Result<ConnectOutcome> {
     let BloomAuthData { token, expires_at } = load_bloom_auth_data();
     let token = match token.map(|value| value.trim().to_string()) {
@@ -172,29 +239,17 @@ async fn connect_once() -> Result<ConnectOutcome> {
         }
     };
     log::info!("bloom_ws: Attempting WebSocket connection...");
-    let mut key_bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut key_bytes);
-    let websocket_key = BASE64_STANDARD.encode(key_bytes);
-
-    let request = Request::builder()
-        .method("GET")
-        .uri(url.as_str())
-        .header("Host", BLOOM_WS_HOST)
-        .header("Origin", BLOOM_EXTENSION_ORIGIN)
-        .header("User-Agent", BLOOM_WS_USER_AGENT)
-        .header("Pragma", "no-cache")
-        .header("Cache-Control", "no-cache")
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header("Sec-WebSocket-Key", websocket_key)
-        .header(
-            "Sec-WebSocket-Extensions",
-            "permessage-deflate; client_max_window_bits",
-        )
-        .body(())?;
-    let (mut ws_stream, _) = match connect_async(request).await {
-        Ok(parts) => parts,
+    let request = match build_bloom_ws_request(url) {
+        Ok(value) => value,
+        Err(err) => {
+            update_ws_status(
+                BloomWsConnectionStatus::Disconnected,
+                format!("Bloom WS: Request construction failed ({})", err),
+            );
+            return Err(err);
+        }
+    };
+    let (mut ws_stream, response) = match connect_async(request).await {
         Err(err) => {
             update_ws_status(
                 BloomWsConnectionStatus::Disconnected,
@@ -202,7 +257,13 @@ async fn connect_once() -> Result<ConnectOutcome> {
             );
             return Err(err.into());
         }
+        Ok(parts) => parts,
     };
+    log::debug!(
+        "bloom_ws: handshake response status={} headers={:?}",
+        response.status(),
+        response.headers()
+    );
     log::info!("bloom_ws: connected");
     update_ws_status(
         BloomWsConnectionStatus::Connected,

@@ -113,8 +113,7 @@ pub async fn generate_task_detail_text(
     let sol_price_value = (*price_guard).map(|value| value as f64);
     drop(price_guard);
 
-    let (wallet_label, wallet_balance) =
-        format_task_bloom_wallet(task, selected_wallet);
+    let (wallet_label, wallet_balance) = format_task_bloom_wallet(task, selected_wallet);
     let wallet_block = match wallet_balance {
         Some(balance) => format!("🏦 *Bloom Wallet:* `{}` `{}`", wallet_label, balance),
         None => format!("🏦 *Bloom Wallet:* `{}`", wallet_label),
@@ -257,8 +256,7 @@ pub async fn generate_task_settings_text(
     _sol_price_state: SolPriceState,
     selected_wallet: Option<&WalletDisplayInfo>,
 ) -> String {
-    let (wallet_label, wallet_balance) =
-        format_task_bloom_wallet(task, selected_wallet);
+    let (wallet_label, wallet_balance) = format_task_bloom_wallet(task, selected_wallet);
     let wallet_line = match wallet_balance {
         Some(balance) => format!("🏦 *Bloom Wallet:* `{}` `{}`", wallet_label, balance),
         None => format!("🏦 *Bloom Wallet:* `{}`", wallet_label),

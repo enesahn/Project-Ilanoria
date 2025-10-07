@@ -1,10 +1,13 @@
-use crate::PENDING_BLOOM_INFO;
-use crate::interfaces::bot::update_bus;
-use crate::interfaces::bot::user::client::UserClientHandle;
+use crate::{
+    ACTIVE_BLOOM_SWAPS, BLOOM_WS_CONNECTION, BloomBuyAck, BloomWsConnectionStatus,
+    PENDING_BLOOM_INFO, PENDING_BLOOM_RESPONSES,
+    interfaces::bot::{update_bus, user::client::UserClientHandle},
+};
 use grammers_client::Update;
 use grammers_tl_types::enums::MessageEntity;
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::time::Instant;
 
 lazy_static! {
     static ref MINT_REGEX: Regex = Regex::new(r"([1-9A-HJ-NP-Za-km-z]{32,44})").unwrap();
@@ -44,6 +47,56 @@ fn reconstruct_text_with_markdown(text: &str, entities: Option<&Vec<MessageEntit
         result.push_str(&String::from_utf16_lossy(&text_utf16[last_offset..]));
     }
     result
+}
+
+fn deliver_telegram_ack(mint: &str, token_name: Option<String>, signature: Option<String>) {
+    let ws_status = {
+        let state = BLOOM_WS_CONNECTION.lock();
+        state.status
+    };
+    if ws_status == BloomWsConnectionStatus::Connected {
+        return;
+    }
+
+    let sender = {
+        let mut responses = PENDING_BLOOM_RESPONSES.lock();
+        responses.remove(mint)
+    };
+
+    let Some(sender) = sender else {
+        return;
+    };
+
+    let started_at = {
+        let mut swaps = ACTIVE_BLOOM_SWAPS.lock();
+        let mut selected: Option<(String, Instant)> = None;
+        for (id, tracker) in swaps.iter() {
+            if tracker.mint == mint {
+                selected = Some((id.clone(), tracker.started_at));
+                break;
+            }
+        }
+        if let Some((id, started)) = selected {
+            swaps.remove(&id);
+            Some(started)
+        } else {
+            log::debug!("bloom_listener: telegram ack tracker missing mint={}", mint);
+            None
+        }
+    };
+
+    let ack = BloomBuyAck {
+        pending_time: started_at.unwrap_or_else(Instant::now),
+        success_time: Instant::now(),
+        token_name,
+        signature,
+    };
+
+    if sender.send(ack).is_err() {
+        log::warn!("bloom_listener: telegram ack channel closed mint={}", mint);
+    } else {
+        log::info!("bloom_listener: telegram ack delivered mint={}", mint);
+    }
 }
 
 pub async fn run_bloom_listener(client: UserClientHandle) {
@@ -104,6 +157,7 @@ pub async fn run_bloom_listener(client: UserClientHandle) {
                             token_name,
                             signature.as_ref().map(|s| s.len()).unwrap_or(0)
                         );
+                        deliver_telegram_ack(&mint, token_name, signature);
                     }
 
                     if raw_text.contains("Market Cap:") && raw_text.contains("Price:") {
