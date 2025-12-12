@@ -1,74 +1,125 @@
-# Project Ilanoria
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust"/>
+  <img src="https://img.shields.io/badge/Solana-9945FF?style=for-the-badge&logo=solana&logoColor=white" alt="Solana"/>
+  <img src="https://img.shields.io/badge/Telegram-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram"/>
+  <img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"/>
+  <img src="https://img.shields.io/badge/Redis-DC382D?style=for-the-badge&logo=redis&logoColor=white" alt="Redis"/>
+</p>
 
-Solana üzerinde token takibi yapıp otomatik alım atan bir Telegram/Discord botu. Rust ile yazıldı, hızlı çalışıyor.
+<h1 align="center">🚀 Project Ilanoria</h1>
 
-## Ne İş Yapıyor?
+<p align="center">
+  <strong>A Telegram/Discord bot that tracks tokens on Solana and executes automatic buys</strong>
+</p>
 
-Telegram veya Discord kanallarını dinliyor, birisi token adresi (CA) paylaştığında bunu yakalayıp Bloom API üzerinden otomatik alım yapıyor. Alfa kanallarını takip edip hızlı hareket etmek isteyenler için ideal.
+<p align="center">
+  <img src="https://img.shields.io/badge/version-1.0.0-blue?style=flat-square" alt="Version"/>
+  <img src="https://img.shields.io/badge/license-Private-red?style=flat-square" alt="License"/>
+  <img src="https://img.shields.io/badge/status-Active-success?style=flat-square" alt="Status"/>
+</p>
 
-## Proje Yapısı
+<p align="center">
+  <a href="README.tr.md">🇹🇷 Türkçe</a>
+</p>
+
+---
+
+## 📖 What Does It Do?
+
+Listens to Telegram or Discord channels, captures token addresses (CA) when someone shares them, and automatically executes buys through the **Bloom API**. Ideal for those who want to follow alpha channels and act fast.
+
+---
+
+## 🏗️ Project Structure
 
 ```
 src/
-├── application/          # Ana iş mantığı
-│   ├── filter/          # Kelime filtreleme (blacklist)
-│   ├── health/          # Bağlantı kontrolü
-│   ├── indexer/         # Token indeksleme motoru
-│   └── pricing/         # SOL fiyat takibi
-├── infrastructure/       # Altyapı
-│   ├── blockchain/      # Blockchain bağlantıları (Bloom, GraphQL, RPC)
-│   ├── database/        # Redis işlemleri
-│   └── logging/         # Log yönetimi
-└── interfaces/          # Kullanıcı arayüzleri
+├── application/          # Core business logic
+│   ├── filter/          # Word filtering (blacklist)
+│   ├── health/          # Connection health checks
+│   ├── indexer/         # Token indexing engine
+│   └── pricing/         # SOL price tracking
+├── infrastructure/       # Infrastructure
+│   ├── blockchain/      # Blockchain connections (Bloom, GraphQL, RPC)
+│   ├── database/        # Redis operations
+│   └── logging/         # Log management
+└── interfaces/          # User interfaces
     ├── bot/             # Telegram bot (handlers, tasks, ui, user client)
-    └── console/         # Konsol arayüzü
+    └── console/         # Console interface
 ```
 
-## Özellikler
+---
 
-### Token Tespit ve İndeksleme
+## ✨ Features
 
-- **Shard sistemi**: Token adresleri 7 karakterlik parçalara bölünüp hem RAM'de hem Redis'te tutuluyor. Mesaj içinde CA aramak bu sayede çok hızlı oluyor.
-- **Pumpfun ve Raydium desteği**: WebSocket üzerinden yeni tokenları anlık takip ediyor.
-- **LLM yedek**: Normal regex ile CA bulunamazsa Groq API'ye soruyor.
-- **Blacklist**: İstenmeyen kelimeleri içeren mesajları atlıyor.
+### 🔍 Token Detection & Indexing
 
-### Telegram
+| Feature | Description |
+|---------|-------------|
+| **Shard System** | Token addresses split into 7-character chunks stored in both RAM and Redis |
+| **Pumpfun & Raydium** | Real-time tracking of new tokens via WebSocket |
+| **LLM Fallback** | Queries Groq API when regex fails to find CA |
+| **Blacklist** | Skips messages containing unwanted keywords |
 
-- QR kod ile oturum bağlama
-- Kanal ve grup dinleme
-- Belirli kullanıcıları izleme
-- Otomatik davet linklerine katılma
-- Markdown formatında bildirimler
+### 📱 Telegram
 
-### Discord
+- ✅ QR code session linking
+- ✅ Channel and group monitoring
+- ✅ Specific user tracking
+- ✅ Automatic invite link joining
+- ✅ Markdown formatted notifications
 
-- WebSocket ile Gateway bağlantısı
-- Kanal ID'ye göre dinleme
-- Kullanıcı filtreleme
+### 💬 Discord
 
-### Bloom Entegrasyonu
+- ✅ WebSocket Gateway connection
+- ✅ Channel ID based listening
+- ✅ User filtering
 
-- Token alım işlemleri
-- Cüzdan yönetimi
-- WebSocket ile işlem onayı takibi
-- Slippage ve priority fee ayarları
+### 🌸 Bloom Integration
 
-### Görev Sistemi
+- ✅ Token purchase operations
+- ✅ Wallet management
+- ✅ Transaction confirmation tracking via WebSocket
+- ✅ Slippage and priority fee settings
 
-Her kullanıcı birden fazla görev oluşturabiliyor. Her görevde platform, kanal, kullanıcı filtresi, alım miktarı, slippage, priority fee, blacklist ve Bloom cüzdan seçimi yapılabiliyor.
+### 📋 Task System
 
-### Konsol Paneli
+Each user can create multiple tasks with:
 
-Terminal üzerinden bağlantı durumları, kullanıcı logları, görev logları (canlı), indeksleyici aktivitesi ve Redis istatistikleri görüntülenebiliyor.
+> Platform, channel, user filter, purchase amount, slippage, priority fee, blacklist, and Bloom wallet selection
 
-## Çalıştırma
+### 🖥️ Console Panel
+
+Monitor from terminal:
+
+- 📊 Connection status
+- 👤 User logs
+- 📝 Task logs (live)
+- 🔄 Indexer activity
+- 📈 Redis statistics
+
+---
+
+## 🚀 Getting Started
 
 ```bash
+# Build
 cargo build --release
+
+# Run
 cargo run --release
 ```
 
-## Lisans
+---
 
-Özel kullanım için.
+## 📄 License
+
+```
+For private use only.
+```
+
+---
+
+<p align="center">
+  <sub>Built with ❤️ in Rust</sub>
+</p>
